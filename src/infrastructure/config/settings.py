@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     llm_endpoint: str = Field(default="http://127.0.0.1:1234/v1")
     llm_model_chat: str = Field(default="qwen3-14b")
     llm_model_vision: str = Field(default="qwen3-14b")
-    llm_timeout_seconds: int = Field(default=60, ge=1)
+    llm_timeout_seconds: int = Field(default=180, ge=1)
 
     # --- Vector store (Qdrant) ---
     qdrant_url: str = Field(default="http://localhost:6333")

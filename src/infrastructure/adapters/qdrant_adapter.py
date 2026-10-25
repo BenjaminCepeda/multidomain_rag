@@ -15,9 +15,11 @@ from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
+MICRO_BATCH_SIZE = 250
+
 
 class QdrantAdapter(IVectorRepository):
-    """Qdrant adapter with centralized settings and optional embedding service."""
+    """Qdrant adapter with centralized settings and micro-batched upserts."""
 
     def __init__(
         self,
@@ -69,39 +71,47 @@ class QdrantAdapter(IVectorRepository):
                 "Imposible verificar o estructurar la coleccion en Qdrant.", exc
             ) from exc
 
-    # --- IVectorRepository (target contract) ---
     def ensure_collection(self, vector_dim: int) -> None:
         self._vector_dim = vector_dim
         self._ensure_collection()
 
-    def upsert(self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]) -> None:
+    def upsert(
+        self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]
+    ) -> None:
         self._ensure_collection()
         if len(chunks) != len(vectors):
             raise VectorStorageError("chunks and vectors length mismatch.")
-        points = [
-            PointStruct(
-                id=idx,
-                vector=vec.to_list(),
-                payload={
-                    "chunk_id": str(chunk.chunk_id),
-                    "content": chunk.content,
-                    "is_visual": chunk.is_visual,
-                    "page": chunk.page,
-                    "section": chunk.section,
-                    "document_id": str(chunk.document_id) if chunk.document_id else None,
-                    **chunk.metadata,
-                },
-            )
-            for idx, (chunk, vec) in enumerate(zip(chunks, vectors, strict=False))
-        ]
-        try:
-            self._client.upsert(collection_name=self._collection_name, points=points)
-            logger.info(
-                f"Indexacion exitosa: {len(points)} fragmentos guardados en '{self._collection_name}'."  # noqa: E501
-            )
-        except Exception as exc:
-            logger.error(f"Error critico en persistencia: {exc}")
-            raise VectorStorageError("Fallo en la persistencia vectorial.", exc) from exc
+
+        total = len(chunks)
+        for start in range(0, total, MICRO_BATCH_SIZE):
+            end = min(start + MICRO_BATCH_SIZE, total)
+            batch_chunks = list(chunks[start:end])
+            batch_vectors = list(vectors[start:end])
+            points = [
+                PointStruct(
+                    id=start + idx,
+                    vector=vec.to_list(),
+                    payload={
+                        "chunk_id": str(chunk.chunk_id),
+                        "content": chunk.content,
+                        "is_visual": chunk.is_visual,
+                        "page": chunk.page,
+                        "section": chunk.section,
+                        "document_id": str(chunk.document_id) if chunk.document_id else None,
+                        **chunk.metadata,
+                    },
+                )
+                for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False))
+            ]
+            try:
+                self._client.upsert(collection_name=self._collection_name, points=points)
+                logger.info(
+                    f"Indexacion exitosa: {len(points)} fragmentos guardados en "
+                    f"'{self._collection_name}' ({end}/{total})."
+                )
+            except Exception as exc:
+                logger.error(f"Error critico en persistencia: {exc}")
+                raise VectorStorageError("Fallo en la persistencia vectorial.", exc) from exc
 
     def search(
         self, query_vector: EmbeddingVector, limit: int, min_score: float
@@ -141,15 +151,13 @@ class QdrantAdapter(IVectorRepository):
         return self._client.count(collection_name=self._collection_name).count
 
     def exists_by_id(self, chunk_id: str) -> bool:
-        # Best-effort; Qdrant point ids are positional in current implementation.
         return False
 
-    # --- Backward-compatible helpers used by current use cases ---
+    # --- Backward-compatible helpers ---
     def save_chunks(self, chunks: list[ManualChunk]) -> None:
         vectors = self._embedding.embed_batch([c.content for c in chunks])
         self.upsert(chunks, vectors)
 
     def search_similar(self, query: str, limit: int = 3) -> list[ManualChunk]:
-
         query_vector = self._embedding.embed_text(query)
         return self.search(query_vector, limit=limit, min_score=0.20)

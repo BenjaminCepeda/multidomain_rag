@@ -10,7 +10,6 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .uv_cache/
-uv.lock
 
 # ==========================================
 # 2. SEGURIDAD & ENTORNO
@@ -51,6 +50,11 @@ npm-debug.log*
 
 # Base de datos vectorial local de Qdrant
 qdrant_local_data/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
 
 # Corpus de documentos en bruto (Evita subir PDFs masivos al repositorio)
 data/

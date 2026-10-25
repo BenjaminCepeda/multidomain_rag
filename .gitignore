@@ -59,5 +59,16 @@ dist/
 # Corpus de documentos en bruto (Evita subir PDFs masivos al repositorio)
 data/
 
+# Cache local de modelos y dependencias
+.cache/
+.hf_cache/
+
+# Artefactos de pruebas y cobertura
+.coverage
+htmlcov/
+.pytest_cache/
+
 # NOTA: AGENTS.md NO se incluye deliberadamente en este archivo 
 # para permitir que Git rastree la evolución de las misiones y el progreso del agente.
+
+

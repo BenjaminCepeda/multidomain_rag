@@ -1,37 +1,49 @@
 # src/infrastructure/adapters/qdrant_adapter.py
-import os
 import logging
-from typing import List, Optional
+from collections.abc import Sequence
+
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer
-from src.domain.ports.vector_repository import IVectorRepository
-from src.domain.models.document import ManualChunk
+from qdrant_client.models import Distance, PointStruct, VectorParams
+
 from src.domain.exceptions.core_errors import VectorStorageError
+from src.domain.models.document import ManualChunk
+from src.domain.models.embedding import EmbeddingVector
+from src.domain.ports.embedding_service import IEmbeddingService
+from src.domain.ports.vector_repository import IVectorRepository
+from src.infrastructure.adapters.embedding_adapter import SentenceTransformerEmbeddingAdapter
+from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-class QdrantAdapter(IVectorRepository):
-    """Adaptador profesional con verificación de integridad, resiliencia y auditoría de búsqueda."""
 
-    def __init__(self, location: str, collection_name: str, model_name: str, vector_dim: int) -> None:
-        self._collection_name = collection_name
-        self._vector_dim = vector_dim
-        
-        # Conexión con resiliencia: Intento remoto -> Fallback local
+class QdrantAdapter(IVectorRepository):
+    """Qdrant adapter with centralized settings and optional embedding service."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        embedding: IEmbeddingService | None = None,
+    ) -> None:
+        self._settings = settings
+        self._collection_name = settings.qdrant_collection_name
+        self._vector_dim = settings.embedding_vector_dim
+        self._embedding: IEmbeddingService = embedding or SentenceTransformerEmbeddingAdapter(
+            settings=settings
+        )
+
         try:
-            self._client = QdrantClient(url=location, timeout=2.0)
+            self._client = QdrantClient(
+                url=settings.qdrant_url, timeout=int(settings.qdrant_timeout_seconds)
+            )
             self._client.get_collections()
-            logger.info(f"Conectado a Qdrant remoto en: {location}")
+            logger.info(f"Conectado a Qdrant remoto en: {settings.qdrant_url}")
         except Exception as e:
-            logger.warning(f"No se pudo conectar a Qdrant remoto: {e}. Cambiando a almacenamiento local.")
+            logger.warning(
+                f"No se pudo conectar a Qdrant remoto: {e}. Cambiando a almacenamiento local."
+            )
             self._client = QdrantClient(path="./qdrant_local_data")
-            
-        cache_folder = os.getenv("HF_MODEL_CACHE")
-        self._encoder = SentenceTransformer(model_name, cache_folder=cache_folder)
 
     def has_data(self) -> bool:
-        """Verifica existencia de datos para habilitar/bloquear la UI."""
         try:
             if not self._client.collection_exists(collection_name=self._collection_name):
                 return False
@@ -48,63 +60,91 @@ class QdrantAdapter(IVectorRepository):
                     vectors_config=VectorParams(size=self._vector_dim, distance=Distance.COSINE),
                 )
         except Exception as exc:
-            raise VectorStorageError("Imposible verificar o estructurar la colección en Qdrant.", exc)
+            raise VectorStorageError(
+                "Imposible verificar o estructurar la coleccion en Qdrant.", exc
+            ) from exc
 
-    def save_chunks(self, chunks: List[ManualChunk]) -> None:
+    # --- IVectorRepository (target contract) ---
+    def ensure_collection(self, vector_dim: int) -> None:
+        self._vector_dim = vector_dim
         self._ensure_collection()
+
+    def upsert(self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]) -> None:
+        self._ensure_collection()
+        if len(chunks) != len(vectors):
+            raise VectorStorageError("chunks and vectors length mismatch.")
         points = [
             PointStruct(
                 id=idx,
-                vector=self._encoder.encode(chunk.content).tolist(),
+                vector=vec.to_list(),
                 payload={
-                    "chunk_id": chunk.chunk_id,
+                    "chunk_id": str(chunk.chunk_id),
                     "content": chunk.content,
                     "is_visual": chunk.is_visual,
-                    **chunk.metadata
-                }
-            ) for idx, chunk in enumerate(chunks)
+                    "page": chunk.page,
+                    "section": chunk.section,
+                    "document_id": str(chunk.document_id) if chunk.document_id else None,
+                    **chunk.metadata,
+                },
+            )
+            for idx, (chunk, vec) in enumerate(zip(chunks, vectors, strict=False))
         ]
         try:
             self._client.upsert(collection_name=self._collection_name, points=points)
-            logger.info(f"Indexación exitosa: {len(points)} fragmentos guardados en '{self._collection_name}'.")
+            logger.info(
+                f"Indexacion exitosa: {len(points)} fragmentos guardados en '{self._collection_name}'."  # noqa: E501
+            )
         except Exception as exc:
-            logger.error(f"Error crítico en persistencia: {exc}")
-            raise VectorStorageError("Fallo en la persistencia vectorial.", exc)
+            logger.error(f"Error critico en persistencia: {exc}")
+            raise VectorStorageError("Fallo en la persistencia vectorial.", exc) from exc
 
-    def search_similar(self, query: str, limit: int = 3) -> List[ManualChunk]:
-        """Realiza búsqueda con auditoría de logs para diagnóstico de alucinaciones/vacío."""
+    def search(
+        self, query_vector: EmbeddingVector, limit: int, min_score: float
+    ) -> list[ManualChunk]:
         self._ensure_collection()
         try:
-            query_vector = self._encoder.encode(query).tolist()
             results = self._client.search(
                 collection_name=self._collection_name,
-                query_vector=query_vector,
-                limit=limit
+                query_vector=query_vector.to_list(),
+                limit=limit,
             )
-            
-            # Auditoría detallada de cada intento de búsqueda
-            if not results:
-                logger.warning(f"AUDITORÍA: Búsqueda vacía para la consulta: '{query}'")
-            else:
-                logger.info(f"AUDITORÍA: Se encontraron {len(results)} candidatos para '{query}'")
-                for i, hit in enumerate(results):
-                    logger.info(f" -> [{i}] Score: {hit.score:.4f} | Origen: {hit.payload.get('source', 'N/A')} Pág: {hit.payload.get('page', 'N/A')} | Texto: {str(hit.payload.get('content'))[:70]}...")
-            
-            # Filtro de seguridad: retornamos solo los que tienen relevancia técnica (score >= 0.20)
-            valid_results = [
-                ManualChunk(
-                    chunk_id=str(hit.payload.get("chunk_id")),
-                    content=str(hit.payload.get("content")),
-                    is_visual=bool(hit.payload.get("is_visual")),
-                    metadata=hit.payload
-                ) for hit in results if hit.score >= 0.20 
-            ]
-            
-            if not valid_results and results:
-                logger.warning(f"AUDITORÍA: Coincidencias encontradas pero descartadas por bajo score (umbral 0.20).")
-                
-            return valid_results
+            valid_results: list[ManualChunk] = []
+            for hit in results:
+                if hit.score < min_score:
+                    continue
+                payload = hit.payload or {}
+                from src.domain.models.ids import ChunkId
 
+                chunk_id_raw = payload.get("chunk_id") or str(hit.id)
+                valid_results.append(
+                    ManualChunk(
+                        chunk_id=ChunkId(str(chunk_id_raw)),
+                        content=str(payload.get("content", "")),
+                        is_visual=bool(payload.get("is_visual", False)),
+                        page=int(payload.get("page", 1)) if payload.get("page") is not None else 1,
+                        section=payload.get("section"),
+                        metadata=payload,
+                    )
+                )
+            return valid_results
         except Exception as exc:
-            logger.error(f"Error crítico en ejecución vectorial: {str(exc)}")
-            raise VectorStorageError("Fallo en la ejecución de consulta vectorial.", exc)
+            logger.error(f"Error critico en ejecucion vectorial: {exc!s}")
+            raise VectorStorageError("Fallo en la ejecucion de consulta vectorial.", exc) from exc
+
+    def count(self) -> int:
+        self._ensure_collection()
+        return self._client.count(collection_name=self._collection_name).count
+
+    def exists_by_id(self, chunk_id: str) -> bool:
+        # Best-effort; Qdrant point ids are positional in current implementation.
+        return False
+
+    # --- Backward-compatible helpers used by current use cases ---
+    def save_chunks(self, chunks: list[ManualChunk]) -> None:
+        vectors = self._embedding.embed_batch([c.content for c in chunks])
+        self.upsert(chunks, vectors)
+
+    def search_similar(self, query: str, limit: int = 3) -> list[ManualChunk]:
+
+        query_vector = self._embedding.embed_text(query)
+        return self.search(query_vector, limit=limit, min_score=0.20)

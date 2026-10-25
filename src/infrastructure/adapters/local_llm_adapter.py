@@ -1,32 +1,52 @@
 # src/infrastructure/adapters/local_llm_adapter.py
-import json
-import re
-import requests
 import base64
+import json
 import os
-from typing import List, Dict, Any
-from src.domain.ports.llm_engine import ILLMEngine
+import re
+from collections.abc import Sequence
+
+import requests
+
+from src.domain.exceptions.core_errors import DataIncompleteError, LLMInferenceError
 from src.domain.models.agent import OrchestratorDecision
-from src.domain.exceptions.core_errors import LLMInferenceError, DataIncompleteError
+from src.domain.ports.llm_engine import ILLMEngine
+from src.infrastructure.config.settings import Settings
+
 
 class LocalLLMAdapter(ILLMEngine):
-    def __init__(self, endpoint: str, model_chat: str, model_vision: str) -> None:
-        self._endpoint = endpoint.rstrip('/')
-        self._model_chat = model_chat
-        self._model_vision = model_vision
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        endpoint: str | None = None,
+        model_chat: str | None = None,
+        model_vision: str | None = None,
+        timeout: int | None = None,
+    ) -> None:
+        if settings is not None:
+            endpoint = endpoint or settings.llm_endpoint
+            model_chat = model_chat or settings.llm_model_chat
+            model_vision = model_vision or settings.llm_model_vision
+            timeout = timeout or settings.llm_timeout_seconds
+
+        self._endpoint = (endpoint or "http://127.0.0.1:1234/v1").rstrip("/")
+        self._model_chat = model_chat or "qwen3-14b"
+        self._model_vision = model_vision or "qwen3-14b"
+        self._timeout = timeout or 60
         self._headers = {"Content-Type": "application/json"}
 
     def check_health(self) -> bool:
-        """Verifica si el motor LLM está operativo."""
         try:
             response = requests.get(f"{self._endpoint}/models", timeout=3)
-            return response.status_code == 200
+            return int(response.status_code) == 200
         except Exception:
             return False
 
+    def health_check(self) -> bool:
+        return self.check_health()
+
     def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision:
         if not self.check_health():
-            raise LLMInferenceError("El motor LLM no está disponible.")
+            raise LLMInferenceError("El motor LLM no esta disponible.")
 
         url = f"{self._endpoint}/chat/completions"
         prompt_sistema = (
@@ -37,93 +57,102 @@ class LocalLLMAdapter(ILLMEngine):
             "model": self._model_chat,
             "messages": [
                 {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": f"Operario: {user_input} | Imagen: {has_image}"}
+                {"role": "user", "content": f"Operario: {user_input} | Imagen: {has_image}"},
             ],
-            "temperature": 0.0
+            "temperature": 0.0,
         }
-        
-        response = requests.post(url, json=payload, headers=self._headers, timeout=20)
+
+        response = requests.post(url, json=payload, headers=self._headers, timeout=self._timeout)
         response.raise_for_status()
-        raw_content = response.json()["choices"][0]["message"]["content"].strip()
-        
-        clean_content = re.sub(r'^```json\s*|\s*```$', '', raw_content, flags=re.MULTILINE)
-        start = clean_content.find('{')
+        raw_content = str(response.json()["choices"][0]["message"]["content"]).strip()
+
+        clean_content = re.sub(r"^```json\s*|\s*```$", "", raw_content, flags=re.MULTILINE)
+        start = clean_content.find("{")
         end = -1
         count = 0
         for i, char in enumerate(clean_content[start:]):
-            if char == '{': count += 1
-            elif char == '}': count -= 1
+            if char == "{":
+                count += 1
+            elif char == "}":
+                count -= 1
             if count == 0:
                 end = start + i + 1
                 break
-        
+
         if start == -1 or end == -1:
-            raise LLMInferenceError(f"El motor no devolvió un JSON válido. Contenido: {raw_content}")
-            
+            raise LLMInferenceError(
+                f"El motor no devolvio un JSON valido. Contenido: {raw_content}"
+            )
+
         data = json.loads(clean_content[start:end])
         return OrchestratorDecision(
-            razonamiento=data.get("razonamiento", "Sin descripción"),
+            razonamiento=data.get("razonamiento", "Sin descripcion"),
             herramienta=data.get("herramienta", "responder_directo"),
-            parametro=data.get("parametro")
+            parametro=data.get("parametro"),
         )
 
-    def generate_response(self, context: List[Dict[str, Any]], user_input: str) -> str:
-        """Genera respuesta garantizando veracidad mediante contexto estricto."""
+    def generate_response(self, context: Sequence[str], user_input: str) -> str:
         if not self.check_health():
-            raise LLMInferenceError("El motor LLM no está disponible.")
-            
+            raise LLMInferenceError("El motor LLM no esta disponible.")
+
         if not context:
-            return "No hay información relevante en los documentos para responder."
+            return "No hay informacion relevante en los documentos para responder."
 
         url = f"{self._endpoint}/chat/completions"
-        
-        context_str = "\n\n".join([
-            f"[FUENTE: {os.path.basename(c.get('metadata', {}).get('source', 'Desconocido'))} | PÁGINA: {c.get('metadata', {}).get('page', 'N/A')}]\n{c.get('content', '')}"
-            for c in context
-        ])
-        
+
+        context_str = "\n\n".join(context)
+
         system_prompt = (
-            "Eres un asistente técnico experto. Tu objetivo es la precisión absoluta. "
-            "1. Responde ÚNICAMENTE basándote en el 'Contexto técnico' proporcionado. "
-            "2. Si la información no está en el contexto, di explícitamente: 'No dispongo de información en los manuales'. "
-            "3. DEBES incluir la fuente y página al final de cada frase técnica usando el formato: [Archivo, Pág]. "
-            "4. NUNCA inventes información ni alucines referencias. Si no puedes verificarlo en el contexto, no lo incluyas."
+            "Eres un asistente tecnico experto. Tu objetivo es la precision absoluta. "
+            "1. Responde UNICAMENTE basandote en el 'Contexto tecnico' proporcionado. "
+            "2. Si la informacion no esta en el contexto, di explicitamente: 'No dispongo de informacion en los manuales'. "  # noqa: E501
+            "3. DEBES incluir la fuente y pagina al final de cada frase tecnica usando el formato: [Archivo, Pag]. "  # noqa: E501
+            "4. NUNCA inventes informacion ni alucines referencias. Si no puedes verificarlo en el contexto, no lo incluyas."  # noqa: E501
         )
-        
+
         payload = {
             "model": self._model_chat,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Contexto técnico:\n{context_str}\n\nPregunta: {user_input}"}
+                {
+                    "role": "user",
+                    "content": f"Contexto tecnico:\n{context_str}\n\nPregunta: {user_input}",
+                },
             ],
             "temperature": 0.1,
-            "max_tokens": 800
+            "max_tokens": 800,
         }
-        
-        response = requests.post(url, json=payload, headers=self._headers, timeout=60)
+
+        response = requests.post(url, json=payload, headers=self._headers, timeout=self._timeout)
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
+        return str(response.json()["choices"][0]["message"]["content"]).strip()
 
     def analyze_image(self, image_path: str) -> str:
         if not self.check_health():
-            raise LLMInferenceError("El motor LLM no está disponible.")
-            
+            raise LLMInferenceError("El motor LLM no esta disponible.")
+
         if not os.path.exists(image_path):
             raise DataIncompleteError(f"Archivo no encontrado: {image_path}")
         with open(image_path, "rb") as f:
-            base64_image = base64.b64encode(f.read()).decode('utf-8')
-        
+            base64_image = base64.b64encode(f.read()).decode("utf-8")
+
         url = f"{self._endpoint}/chat/completions"
         payload = {
             "model": self._model_vision,
             "messages": [
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Describe este diagrama técnico brevemente."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]}
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe este diagrama tecnico brevemente."},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                        },
+                    ],
+                }
             ],
-            "temperature": 0.1
+            "temperature": 0.1,
         }
-        response = requests.post(url, json=payload, headers=self._headers, timeout=60)
+        response = requests.post(url, json=payload, headers=self._headers, timeout=self._timeout)
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"].strip()
+        return str(response.json()["choices"][0]["message"]["content"]).strip()

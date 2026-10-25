@@ -97,8 +97,11 @@ class UserInterfaceApplication:
 
         progress_queue: queue.Queue[tuple[str, float, str]] = queue.Queue()
         result_holder: dict[str, Any] = {"result": None, "error": None}
+        last_detail = "Archivo actual: preparando..."
 
         def progress_callback(value: float, desc: str) -> None:
+            nonlocal last_detail
+            last_detail = f"Archivo actual: {desc} ({int(value * 100)}%)"
             progress_queue.put(("progress", value, desc))
 
         def worker() -> None:
@@ -122,10 +125,11 @@ class UserInterfaceApplication:
             try:
                 kind, value, desc = progress_queue.get(timeout=1.0)
             except queue.Empty:
-                yield "Procesando lote en segundo plano... (ingesta en curso)"
+                yield f"Estado general: Procesando lote en segundo plano...\n{last_detail}"
                 continue
             if kind == "progress":
-                yield f"{desc} ({int(value * 100)}%)"
+                last_detail = f"Archivo actual: {desc} ({int(value * 100)}%)"
+                yield f"Estado general: Ingesta en curso\n{last_detail}"
             elif kind == "done":
                 break
 
@@ -165,6 +169,24 @@ class UserInterfaceApplication:
                 refresh_btn = gr.Button("Refrescar estado")
                 refresh_btn.click(self.refresh_status, None, [status_box])
                 interface.load(self.refresh_status, None, [status_box])
+
+            with gr.Tab("Ingesta"):
+                ingest_files = gr.File(
+                    label="Documentos (PDF/TXT)", file_count="multiple", type="filepath"
+                )
+                policy_dropdown = gr.Dropdown(
+                    choices=["auto", "normal", "extended"],
+                    value="auto",
+                    label="Politica de ingesta",
+                )
+                ingest_btn = gr.Button("Ingestar documentos")
+                ingest_result = gr.Textbox(label="Resultado de ingesta", lines=10, interactive=False)  # noqa: E501
+
+                ingest_btn.click(
+                    self.run_ingestion,
+                    inputs=[ingest_files, policy_dropdown],
+                    outputs=[ingest_result],
+                )
 
             with gr.Tab("Operacion"):
                 chatbot = gr.Chatbot(label="Historial", height=450, type="messages")
@@ -301,24 +323,6 @@ class UserInterfaceApplication:
                     self.process_user_interaction,
                     [txt_input, staged_image, chatbot],
                     [txt_input, staged_image, chatbot, last_status],
-                )
-
-            with gr.Tab("Ingesta"):
-                ingest_files = gr.File(
-                    label="Documentos (PDF/TXT)", file_count="multiple", type="filepath"
-                )
-                policy_dropdown = gr.Dropdown(
-                    choices=["auto", "normal", "extended"],
-                    value="auto",
-                    label="Politica de ingesta",
-                )
-                ingest_btn = gr.Button("Ingestar documentos")
-                ingest_result = gr.Textbox(label="Resultado de ingesta", lines=10, interactive=False)  # noqa: E501
-
-                ingest_btn.click(
-                    self.run_ingestion,
-                    inputs=[ingest_files, policy_dropdown],
-                    outputs=[ingest_result],
                 )
 
         return interface  # type: ignore[no-any-return]

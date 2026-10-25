@@ -1,6 +1,7 @@
-import contextlib
 import logging
 import os
+import queue
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -81,11 +82,10 @@ class UserInterfaceApplication:
     def refresh_status(self) -> str:
         return self._presenter.build_status()
 
-    def run_ingestion(
-        self, files: Any, policy: str, progress: gr.Progress = gr.Progress()  # noqa: B008
-    ) -> str:
+    def run_ingestion(self, files: Any, policy: str) -> Any:
         if not files:
-            return "No se seleccionaron archivos."
+            yield "No se seleccionaron archivos."
+            return
 
         file_list = files if isinstance(files, list) else [files]
         paths: list[Path] = []
@@ -93,22 +93,53 @@ class UserInterfaceApplication:
             path_str = getattr(f, "name", None) or str(f)
             paths.append(Path(path_str))
 
-        progress(0, desc="Preparando ingesta...")
+        yield "Ingesta iniciada en segundo plano..."
+
+        progress_queue: queue.Queue[tuple[str, float, str]] = queue.Queue()
+        result_holder: dict[str, Any] = {"result": None, "error": None}
 
         def progress_callback(value: float, desc: str) -> None:
-            with contextlib.suppress(Exception):
-                progress(value, desc=desc)
+            progress_queue.put(("progress", value, desc))
 
-        policy_override = None if policy == "auto" else policy
-        request = IngestionRequestDTO(
-            file_paths=tuple(paths),
-            policy_override=policy_override,
-        )
+        def worker() -> None:
+            try:
+                policy_override = None if policy == "auto" else policy
+                request = IngestionRequestDTO(
+                    file_paths=tuple(paths),
+                    policy_override=policy_override,
+                )
+                result = self._ingest_use_case.execute(request, progress_callback=progress_callback)
+                result_holder["result"] = result
+            except Exception as e:
+                result_holder["error"] = e
+            finally:
+                progress_queue.put(("done", 1.0, "Finalizado"))
 
-        try:
-            result = self._ingest_use_case.execute(request, progress_callback=progress_callback)
-        except Exception as e:
-            return f"Error durante la ingesta: {e!s}"
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+        while True:
+            try:
+                kind, value, desc = progress_queue.get(timeout=1.0)
+            except queue.Empty:
+                yield "Procesando lote en segundo plano... (ingesta en curso)"
+                continue
+            if kind == "progress":
+                yield f"{desc} ({int(value * 100)}%)"
+            elif kind == "done":
+                break
+
+        thread.join(timeout=1.0)
+
+        error = result_holder["error"]
+        if error is not None:
+            yield f"Error durante la ingesta: {error!s}"
+            return
+
+        result = result_holder["result"]
+        if result is None:
+            yield "Error durante la ingesta: resultado no disponible."
+            return
 
         lines = [
             f"Documentos procesados: {result.documents_processed}",
@@ -121,7 +152,7 @@ class UserInterfaceApplication:
             lines.append("Errores por archivo:")
             for failed in result.failed_files:
                 lines.append(f"- {failed}")
-        return "\n".join(lines)
+        yield "\n".join(lines)
 
     def build_interface(self) -> gr.Blocks:
         with gr.Blocks(title="Edge-AI Agent", css="src/presentation/assets/style.css") as interface:

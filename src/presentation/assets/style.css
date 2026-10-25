@@ -1,0 +1,74 @@
+/* src/presentation/assets/style.css */
+
+/* Contenedor de la barra de entrada */
+.input-container { 
+    display: flex !important; 
+    flex-direction: column !important; 
+    width: 100% !important; 
+    border: 1px solid #e0e0e0 !important; 
+    border-radius: 20px !important; 
+    padding: 8px !important; 
+    background: white !important; 
+    position: relative !important; 
+}
+
+.input-row { 
+    display: flex !important; 
+    align-items: center !important; 
+    gap: 8px !important; 
+    min-height: 40px !important; 
+}
+
+.minimal-btn { 
+    border: none !important; 
+    background: transparent !important; 
+    color: #666 !important; 
+    width: 36px !important; 
+    height: 36px !important; 
+    flex-shrink: 0 !important; 
+}
+
+.preview-container { 
+    padding: 5px !important; 
+    display: flex !important; 
+    align-items: center !important; 
+}
+
+.preview-thumb { 
+    width: 50px !important; 
+    height: 50px !important; 
+    border-radius: 8px !important; 
+    object-fit: cover !important; 
+}
+
+/* POPUP FLOTANTE REAL - Estilo Gemini (Obliga a renderizarse ARRIBA de la barra) */
+.menu-popup {
+    position: absolute !important;
+    bottom: 75px !important; 
+    left: 15px !important;
+    z-index: 99999 !important; 
+    background: #ffffff !important;
+    border: 1px solid #ddd !important;
+    border-radius: 12px !important;
+    padding: 10px !important;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2) !important;
+    width: 170px !important;
+}
+
+/* VENTANA EMERGENTE REAL (MODAL CÁMARA) - Centrado absoluto en el Viewport */
+.camera-modal {
+    position: fixed !important; 
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important; 
+    width: 90% !important;
+    max-width: 500px !important;
+    z-index: 999999 !important; 
+    background: #ffffff !important;
+    padding: 20px !important;
+    border-radius: 16px !important;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.3) !important;
+    border: 1px solid #bbb !important;
+    
+}
+

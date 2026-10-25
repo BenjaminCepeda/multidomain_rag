@@ -1,0 +1,41 @@
+# --- ENTORNO VIRTUAL Y PYTHON ---
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# --- VARIABLES DE ENTRONO (Seguridad) ---
+.env
+.env.local
+.env.*
+
+# --- IDE (Cursor / VS Code) ---
+.vscode/
+.history/
+*.code-workspace
+
+# --- SISTEMA OPERATIVO (Windows) ---
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- NODE / PACKAGES (Soporte OpenCode) ---
+node_modules/
+npm-debug.log*
+
+# --- CONFIGURACIÓN LOCAL DE OPENCODE ---
+# Ignoramos la carpeta de configuración local porque contiene rutas absolutas de tu máquina.
+.opencode/
+
+# NOTA: AGENTS.md NO se incluye en este archivo. 
+# Se queda fuera para que Git pueda registrar el avance de las misiones del agente.
+
+# --- DIRECTORIO DE TRABAJO DE QDRANT ---
+qdrant_local_data/
+
+# --- BBLIOTECA DE MANUALES ---
+data/

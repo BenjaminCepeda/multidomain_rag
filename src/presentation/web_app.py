@@ -60,7 +60,8 @@ class UserInterfaceApplication:
             outbound_dto = self._orchestrate_use_case.execute(
                 InboundPayloadDTO(user_input=text_content, image_path=staged_image)
             )
-            history.append([text_content, outbound_dto.response_text])
+            history.append({"role": "user", "content": text_content})
+            history.append({"role": "assistant", "content": outbound_dto.response_text})
             status_text = (
                 f"Herramienta: {outbound_dto.used_tool} | "
                 f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'}"
@@ -68,10 +69,12 @@ class UserInterfaceApplication:
             if outbound_dto.is_degraded and outbound_dto.error_log:
                 status_text += f" | Error: {outbound_dto.error_log}"
         except DomainBaseError as e:
-            history.append([text_content, f"Error del dominio: {e.message}"])
+            history.append({"role": "user", "content": text_content})
+            history.append({"role": "assistant", "content": f"Error del dominio: {e.message}"})
             status_text = f"Error: {e.message}"
         except Exception as e:
-            history.append([text_content, f"Error: {e!s}"])
+            history.append({"role": "user", "content": text_content})
+            history.append({"role": "assistant", "content": f"Error: {e!s}"})
             status_text = f"Error inesperado: {e!s}"
         return "", None, history, status_text
 
@@ -133,7 +136,7 @@ class UserInterfaceApplication:
                 interface.load(self.refresh_status, None, [status_box])
 
             with gr.Tab("Operacion"):
-                chatbot = gr.Chatbot(label="Historial", height=450)
+                chatbot = gr.Chatbot(label="Historial", height=450, type="messages")
                 last_status = gr.Textbox(label="Estado del turno", lines=2, interactive=False)
 
                 with gr.Column(elem_classes="input-container"):

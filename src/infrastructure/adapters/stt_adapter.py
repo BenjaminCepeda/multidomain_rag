@@ -1,12 +1,31 @@
 # src/infrastructure/adapters/stt_adapter.py
 import logging
+from typing import Any
 
+import av
 from faster_whisper import WhisperModel
 
 from src.domain.exceptions.core_errors import HardwareDegradationError
 from src.domain.ports.audio_service import IAudioService
 
 logger = logging.getLogger(__name__)
+
+# Compatibility shim: some PyAV versions do not accept the `metadata_errors`
+# keyword argument used internally by faster-whisper. We strip it gracefully.
+_original_av_open = av.open
+
+
+def _av_open_compat(*args: Any, **kwargs: Any) -> Any:
+    try:
+        return _original_av_open(*args, **kwargs)
+    except TypeError as exc:
+        if "metadata_errors" in str(exc):
+            kwargs.pop("metadata_errors", None)
+            return _original_av_open(*args, **kwargs)
+        raise
+
+
+av.open = _av_open_compat
 
 
 class STTAdapter(IAudioService):

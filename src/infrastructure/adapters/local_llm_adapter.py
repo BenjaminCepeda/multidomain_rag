@@ -62,8 +62,17 @@ class LocalLLMAdapter(ILLMEngine):
             "temperature": 0.0,
         }
 
-        response = requests.post(url, json=payload, headers=self._headers, timeout=self._timeout)
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                url, json=payload, headers=self._headers, timeout=self._timeout
+            )
+            response.raise_for_status()
+        except requests.exceptions.Timeout as exc:
+            raise LLMInferenceError("Timeout en inferencia del LLM local.", exc) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise LLMInferenceError("No se pudo conectar al LLM local.", exc) from exc
+        except requests.exceptions.RequestException as exc:
+            raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
         raw_content = str(response.json()["choices"][0]["message"]["content"]).strip()
 
         clean_content = re.sub(r"^```json\s*|\s*```$", "", raw_content, flags=re.MULTILINE)
@@ -123,8 +132,17 @@ class LocalLLMAdapter(ILLMEngine):
             "max_tokens": 800,
         }
 
-        response = requests.post(url, json=payload, headers=self._headers, timeout=self._timeout)
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                url, json=payload, headers=self._headers, timeout=self._timeout
+            )
+            response.raise_for_status()
+        except requests.exceptions.Timeout as exc:
+            raise LLMInferenceError("Timeout en inferencia del LLM local.", exc) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise LLMInferenceError("No se pudo conectar al LLM local.", exc) from exc
+        except requests.exceptions.RequestException as exc:
+            raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
         return str(response.json()["choices"][0]["message"]["content"]).strip()
 
     def analyze_image(self, image_path: str) -> str:
@@ -153,6 +171,15 @@ class LocalLLMAdapter(ILLMEngine):
             ],
             "temperature": 0.1,
         }
-        response = requests.post(url, json=payload, headers=self._headers, timeout=self._timeout)
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                url, json=payload, headers=self._headers, timeout=self._timeout
+            )
+            response.raise_for_status()
+        except requests.exceptions.Timeout as exc:
+            raise LLMInferenceError("Timeout en inferencia del LLM local.", exc) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise LLMInferenceError("No se pudo conectar al LLM local.", exc) from exc
+        except requests.exceptions.RequestException as exc:
+            raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
         return str(response.json()["choices"][0]["message"]["content"]).strip()

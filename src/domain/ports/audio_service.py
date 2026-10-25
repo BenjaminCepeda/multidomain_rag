@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 
+
 class IAudioService(ABC):
     """Contrato para la captura y reproducción fonética local."""
-    
+
     @abstractmethod
     def is_stt_available(self) -> bool:
         """Verifica de forma proactiva la salud del hardware de entrada de audio (Micrófono)."""
@@ -17,7 +18,7 @@ class IAudioService(ABC):
     def listen(self) -> str:
         """
         Captura el flujo del micrófono y aplica transcripción local (Whisper).
-        
+
         Raises:
             HardwareDegradationError: Si el canal de grabación está bloqueado o ausente.
         """
@@ -27,7 +28,7 @@ class IAudioService(ABC):
     def speak(self, text: str) -> None:
         """
         Sintetiza texto a voz de forma síncrona.
-        
+
         Raises:
             HardwareDegradationError: Si los hilos de salida de audio del sistema fallan.
         """

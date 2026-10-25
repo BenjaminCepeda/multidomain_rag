@@ -31,17 +31,22 @@ class QdrantAdapter(IVectorRepository):
             settings=settings
         )
 
-        try:
-            self._client = QdrantClient(
-                url=settings.qdrant_url, timeout=int(settings.qdrant_timeout_seconds)
-            )
-            self._client.get_collections()
-            logger.info(f"Conectado a Qdrant remoto en: {settings.qdrant_url}")
-        except Exception as e:
-            logger.warning(
-                f"No se pudo conectar a Qdrant remoto: {e}. Cambiando a almacenamiento local."
-            )
-            self._client = QdrantClient(path="./qdrant_local_data")
+        location = settings.qdrant_url.strip()
+        if location.startswith("http://") or location.startswith("https://"):
+            try:
+                self._client = QdrantClient(
+                    url=location, timeout=int(settings.qdrant_timeout_seconds)
+                )
+                self._client.get_collections()
+                logger.info(f"Conectado a Qdrant remoto en: {location}")
+            except Exception as e:
+                logger.warning(
+                    f"No se pudo conectar a Qdrant remoto: {e}. Cambiando a almacenamiento local."
+                )
+                self._client = QdrantClient(path="./qdrant_local_data")
+        else:
+            logger.info(f"Usando Qdrant local en: {location}")
+            self._client = QdrantClient(path=location)
 
     def has_data(self) -> bool:
         try:

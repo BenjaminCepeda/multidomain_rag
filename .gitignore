@@ -50,6 +50,7 @@ npm-debug.log*
 
 # Base de datos vectorial local de Qdrant
 qdrant_local_data/
+.qdrant_data/
 
 # Build artifacts
 build/

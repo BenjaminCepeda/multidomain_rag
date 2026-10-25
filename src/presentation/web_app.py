@@ -1,15 +1,18 @@
+import contextlib
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import gradio as gr
 
 from src.application.dtos.agent_dtos import InboundPayloadDTO
+from src.application.dtos.ingestion_dtos import IngestionRequestDTO
+from src.domain.exceptions.core_errors import DomainBaseError
 from src.infrastructure.composition.root import ApplicationContext, CompositionRoot
+from src.presentation.ui_state_presenter import UIStatePresenter
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", force=True
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", force=True)  # noqa: E501
 
 
 class UserInterfaceApplication:
@@ -21,6 +24,7 @@ class UserInterfaceApplication:
         self._stt_engine = self._ctx.stt
         self._ingest_use_case = self._ctx.ingest_use_case
         self._orchestrate_use_case = self._ctx.orchestrate_use_case
+        self._presenter = UIStatePresenter(self._ctx)
 
     def transcribe_audio(self, audio_path: str) -> str:
         if not audio_path:
@@ -46,18 +50,75 @@ class UserInterfaceApplication:
 
     def process_user_interaction(
         self, message: str, staged_image: str | None, history: list[Any]
-    ) -> tuple[str, str | None, list[Any]]:
+    ) -> tuple[str, str | None, list[Any], str]:
         text_content = (message or "").strip()
         if not text_content and not staged_image:
-            return "", None, history
+            return "", None, history, ""
+
+        status_text = ""
         try:
             outbound_dto = self._orchestrate_use_case.execute(
                 InboundPayloadDTO(user_input=text_content, image_path=staged_image)
             )
             history.append([text_content, outbound_dto.response_text])
+            status_text = (
+                f"Herramienta: {outbound_dto.used_tool} | "
+                f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'}"
+            )
+            if outbound_dto.is_degraded and outbound_dto.error_log:
+                status_text += f" | Error: {outbound_dto.error_log}"
+        except DomainBaseError as e:
+            history.append([text_content, f"Error del dominio: {e.message}"])
+            status_text = f"Error: {e.message}"
         except Exception as e:
             history.append([text_content, f"Error: {e!s}"])
-        return "", None, history
+            status_text = f"Error inesperado: {e!s}"
+        return "", None, history, status_text
+
+    def refresh_status(self) -> str:
+        return self._presenter.build_status()
+
+    def run_ingestion(
+        self, files: Any, policy: str, progress: gr.Progress = gr.Progress()  # noqa: B008
+    ) -> str:
+        if not files:
+            return "No se seleccionaron archivos."
+
+        file_list = files if isinstance(files, list) else [files]
+        paths: list[Path] = []
+        for f in file_list:
+            path_str = getattr(f, "name", None) or str(f)
+            paths.append(Path(path_str))
+
+        progress(0, desc="Preparando ingesta...")
+
+        def progress_callback(value: float, desc: str) -> None:
+            with contextlib.suppress(Exception):
+                progress(value, desc=desc)
+
+        policy_override = None if policy == "auto" else policy
+        request = IngestionRequestDTO(
+            file_paths=tuple(paths),
+            policy_override=policy_override,
+        )
+
+        try:
+            result = self._ingest_use_case.execute(request, progress_callback=progress_callback)
+        except Exception as e:
+            return f"Error durante la ingesta: {e!s}"
+
+        lines = [
+            f"Documentos procesados: {result.documents_processed}",
+            f"Fragmentos indexados: {result.chunks_indexed}",
+            f"Duplicados omitidos: {result.skipped_duplicates}",
+            f"Archivos fallidos: {len(result.failed_files)}",
+        ]
+        if result.failed_files:
+            lines.append("")
+            lines.append("Errores por archivo:")
+            for failed in result.failed_files:
+                lines.append(f"- {failed}")
+        return "\n".join(lines)
 
     def build_interface(self) -> gr.Blocks:
         with gr.Blocks(title="Edge-AI Agent", css="src/presentation/assets/style.css") as interface:
@@ -65,8 +126,15 @@ class UserInterfaceApplication:
             menu_visible = gr.State(False)
             is_recording = gr.State(False)
 
+            with gr.Tab("Estado"):
+                status_box = gr.Textbox(label="Estado de servicios", lines=6, interactive=False)
+                refresh_btn = gr.Button("Refrescar estado")
+                refresh_btn.click(self.refresh_status, None, [status_box])
+                interface.load(self.refresh_status, None, [status_box])
+
             with gr.Tab("Operacion"):
                 chatbot = gr.Chatbot(label="Historial", height=450)
+                last_status = gr.Textbox(label="Estado del turno", lines=2, interactive=False)
 
                 with gr.Column(elem_classes="input-container"):
                     with gr.Row(visible=False, elem_classes="preview-container") as preview_row:
@@ -75,15 +143,11 @@ class UserInterfaceApplication:
                         )
                         btn_remove = gr.Button("X", size="sm", elem_classes="minimal-btn")
 
-                    audio_input = gr.Audio(
-                        sources=["microphone"], type="filepath", visible=False, elem_id="hidden-mic"
-                    )
+                    audio_input = gr.Audio(sources=["microphone"], type="filepath", visible=False, elem_id="hidden-mic")  # noqa: E501
 
                     with gr.Row(elem_classes="input-row"):
                         btn_plus = gr.Button("+", elem_classes="minimal-btn")
-                        txt_input = gr.Textbox(
-                            placeholder="Escribe tu consulta...", show_label=False, scale=5
-                        )
+                        txt_input = gr.Textbox(placeholder="Escribe tu consulta...", show_label=False, scale=5)  # noqa: E501
                         btn_mic = gr.Button("Mic", elem_classes="minimal-btn")
                         btn_send = gr.Button("Send", elem_classes="minimal-btn")
 
@@ -99,9 +163,7 @@ class UserInterfaceApplication:
                 def toggle_menu(is_visible: bool) -> tuple[bool, Any]:
                     return not is_visible, gr.update(visible=not is_visible)
 
-                btn_plus.click(
-                    toggle_menu, inputs=[menu_visible], outputs=[menu_visible, action_menu]
-                )
+                btn_plus.click(toggle_menu, inputs=[menu_visible], outputs=[menu_visible, action_menu])  # noqa: E501
 
                 toggle_mic_js = """
                 () => {
@@ -113,7 +175,6 @@ class UserInterfaceApplication:
                         "#hidden-mic button[aria-label='Stop recording'], " +
                         "#hidden-mic button[class*='stop']"
                     );
-
                     if (recordBtn) {
                         recordBtn.click();
                     } else if (stopBtn) {
@@ -125,21 +186,16 @@ class UserInterfaceApplication:
                 def handle_mic_state(recording: bool) -> tuple[bool, Any]:
                     if not recording:
                         return True, gr.update(value="Stop", variant="stop")
-                    else:
-                        return False, gr.update(value="Mic", variant="secondary")
+                    return False, gr.update(value="Mic", variant="secondary")
 
                 btn_mic.click(
-                    handle_mic_state,
-                    inputs=[is_recording],
-                    outputs=[is_recording, btn_mic],
+                    handle_mic_state, inputs=[is_recording], outputs=[is_recording, btn_mic]
                 ).then(None, js=toggle_mic_js)
 
                 def post_transcription_reset(path: str | None) -> tuple[Any, Any, Any, Any]:
                     if not path:
                         return gr.update(), gr.update(), gr.update(), gr.update()
-
                     texto_detectado = self.transcribe_audio(path)
-
                     return texto_detectado, False, gr.update(value="Mic", variant="secondary"), None
 
                 audio_input.change(
@@ -210,9 +266,31 @@ class UserInterfaceApplication:
                 btn_send.click(
                     self.process_user_interaction,
                     [txt_input, staged_image, chatbot],
-                    [txt_input, staged_image, chatbot],
+                    [txt_input, staged_image, chatbot, last_status],
                 )
+
+            with gr.Tab("Ingesta"):
+                ingest_files = gr.File(
+                    label="Documentos (PDF/TXT)", file_count="multiple", type="filepath"
+                )
+                policy_dropdown = gr.Dropdown(
+                    choices=["auto", "normal", "extended"],
+                    value="auto",
+                    label="Politica de ingesta",
+                )
+                ingest_btn = gr.Button("Ingestar documentos")
+                ingest_result = gr.Textbox(label="Resultado de ingesta", lines=10, interactive=False)  # noqa: E501
+
+                ingest_btn.click(
+                    self.run_ingestion,
+                    inputs=[ingest_files, policy_dropdown],
+                    outputs=[ingest_result],
+                )
+
         return interface  # type: ignore[no-any-return]
+
+    def __del__(self) -> None:  # pragma: no cover
+        pass
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
-# --- ENTORNO VIRTUAL Y PYTHON ---
+# ==========================================
+# 1. PYTHON & UV (Gestión de Dependencias)
+# ==========================================
 venv/
 .venv/
 env/
@@ -7,35 +9,51 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.uv_cache/
+uv.lock
 
-# --- VARIABLES DE ENTRONO (Seguridad) ---
+# ==========================================
+# 2. SEGURIDAD & ENTORNO
+# ==========================================
 .env
 .env.local
 .env.*
 
-# --- IDE (Cursor / VS Code) ---
+# ==========================================
+# 3. CONFIGURACIÓN DE IDEs & EDITORES
+# ==========================================
 .vscode/
 .history/
 *.code-workspace
+.idea/
+*.swp
+*.swo
 
-# --- SISTEMA OPERATIVO (Windows) ---
+# ==========================================
+# 4. SISTEMA OPERATIVO (Windows / Mac)
+# ==========================================
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
+.DS_Store
 
-# --- NODE / PACKAGES (Soporte OpenCode) ---
+# ==========================================
+# 5. NODE / WEB TOOLS (Soporte OpenCode CLI)
+# ==========================================
 node_modules/
 npm-debug.log*
 
-# --- CONFIGURACIÓN LOCAL DE OPENCODE ---
-# Ignoramos la carpeta de configuración local porque contiene rutas absolutas de tu máquina.
+# ==========================================
+# 6. OPENCODE & RAG PERSISTENCIA LOCAL
+# ==========================================
+# Se ignora .opencode/ por rutas absolutas locales de la máquina.
 .opencode/
 
-# NOTA: AGENTS.md NO se incluye en este archivo. 
-# Se queda fuera para que Git pueda registrar el avance de las misiones del agente.
-
-# --- DIRECTORIO DE TRABAJO DE QDRANT ---
+# Base de datos vectorial local de Qdrant
 qdrant_local_data/
 
-# --- BBLIOTECA DE MANUALES ---
+# Corpus de documentos en bruto (Evita subir PDFs masivos al repositorio)
 data/
+
+# NOTA: AGENTS.md NO se incluye deliberadamente en este archivo 
+# para permitir que Git rastree la evolución de las misiones y el progreso del agente.

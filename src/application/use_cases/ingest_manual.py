@@ -37,9 +37,6 @@ class IngestManualUseCase:
         indexed_chunks = 0
         start_time = time.perf_counter()
 
-        if request.file_paths:
-            self._repository.clear()
-
         for i, path in enumerate(request.file_paths):
             path_str = str(path)
             try:

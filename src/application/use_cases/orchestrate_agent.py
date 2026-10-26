@@ -25,7 +25,10 @@ class OrchestrateAgentUseCase:
         self._embedding: IEmbeddingService = embedding
 
     def execute(self, payload: InboundPayloadDTO) -> OutboundResponseDTO:
+        import time
+
         has_image: bool = payload.image_path is not None
+        start_time = time.perf_counter()
 
         try:
             decision = self._llm.get_orchestrator_decision(payload.user_input, has_image)
@@ -73,21 +76,27 @@ class OrchestrateAgentUseCase:
                 response_text=respuesta_final,
                 is_degraded=False,
                 used_tool=used_tool,
+                elapsed_seconds=time.perf_counter() - start_time,
             )
 
         except DomainBaseError as e:
             logger.exception(f"Error en orquestacion: {e!s}")
-            return self._handle_graceful_degradation(payload.user_input, "orquestador", str(e))
+            return self._handle_graceful_degradation(
+                payload.user_input, "orquestador", str(e), time.perf_counter() - start_time
+            )
         except Exception as e:
             logger.exception(f"Error inesperado en orquestacion: {e!s}")
-            return self._handle_graceful_degradation(payload.user_input, "orquestador", str(e))
+            return self._handle_graceful_degradation(
+                payload.user_input, "orquestador", str(e), time.perf_counter() - start_time
+            )
 
     def _handle_graceful_degradation(
-        self, query: str, herramienta: str, motivo_error: str
+        self, query: str, herramienta: str, motivo_error: str, elapsed_seconds: float = 0.0
     ) -> OutboundResponseDTO:
         return OutboundResponseDTO(
             response_text=f"Aviso del sistema: {motivo_error}",
             is_degraded=True,
             used_tool=herramienta,
             error_log=motivo_error,
+            elapsed_seconds=elapsed_seconds,
         )

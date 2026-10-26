@@ -153,6 +153,14 @@ class QdrantAdapter(IVectorRepository):
     def exists_by_id(self, chunk_id: str) -> bool:
         return False
 
+    def clear(self) -> None:
+        try:
+            if self._client.collection_exists(collection_name=self._collection_name):
+                self._client.delete_collection(collection_name=self._collection_name)
+        except Exception as exc:
+            raise VectorStorageError("Fallo al limpiar la coleccion vectorial.", exc) from exc
+        self._ensure_collection()
+
     # --- Backward-compatible helpers ---
     def save_chunks(self, chunks: list[ManualChunk]) -> None:
         vectors = self._embedding.embed_batch([c.content for c in chunks])

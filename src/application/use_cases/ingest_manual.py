@@ -1,6 +1,7 @@
 # src/application/use_cases/ingest_manual.py
 import logging
 import os
+import time
 from collections.abc import Callable
 
 from src.application.dtos.ingestion_dtos import IngestionRequestDTO, IngestionResultDTO
@@ -34,6 +35,10 @@ class IngestManualUseCase:
         failed_files: list[str] = []
         total_files = len(request.file_paths)
         indexed_chunks = 0
+        start_time = time.perf_counter()
+
+        if request.file_paths:
+            self._repository.clear()
 
         for i, path in enumerate(request.file_paths):
             path_str = str(path)
@@ -78,7 +83,7 @@ class IngestManualUseCase:
                 chunks_indexed=0,
                 skipped_duplicates=0,
                 failed_files=tuple(failed_files),
-                duration_seconds=0.0,
+                duration_seconds=time.perf_counter() - start_time,
             )
 
         if progress_callback:
@@ -89,5 +94,5 @@ class IngestManualUseCase:
             chunks_indexed=indexed_chunks,
             skipped_duplicates=0,
             failed_files=tuple(failed_files),
-            duration_seconds=0.0,
+            duration_seconds=time.perf_counter() - start_time,
         )

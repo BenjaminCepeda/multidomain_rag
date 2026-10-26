@@ -19,3 +19,4 @@ class OutboundResponseDTO:
     is_degraded: bool
     used_tool: str
     error_log: str | None = None
+    elapsed_seconds: float = 0.0

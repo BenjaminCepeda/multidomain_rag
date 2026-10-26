@@ -65,7 +65,8 @@ class UserInterfaceApplication:
             history.append({"role": "assistant", "content": outbound_dto.response_text})
             status_text = (
                 f"Herramienta: {outbound_dto.used_tool} | "
-                f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'}"
+                f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'} | "
+                f"Tiempo: {outbound_dto.elapsed_seconds:.2f}s"
             )
             if outbound_dto.is_degraded and outbound_dto.error_log:
                 status_text += f" | Error: {outbound_dto.error_log}"
@@ -150,6 +151,7 @@ class UserInterfaceApplication:
             f"Fragmentos indexados: {result.chunks_indexed}",
             f"Duplicados omitidos: {result.skipped_duplicates}",
             f"Archivos fallidos: {len(result.failed_files)}",
+            f"Tiempo total: {result.duration_seconds:.2f}s",
         ]
         if result.failed_files:
             lines.append("")

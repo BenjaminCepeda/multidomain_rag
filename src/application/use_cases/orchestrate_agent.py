@@ -57,8 +57,8 @@ class OrchestrateAgentUseCase:
                     logger.info(f"Recuperados {len(chunks)} fragmentos.")
 
                 contexto_sintesis = [
-                    f"[FUENTE: {c.metadata.get('source', 'Desconocido')} | PAGINA: {c.metadata.get('page', 'N/A')}]\n{c.content}"  # noqa: E501
-                    for c in chunks
+                    f"=== FRAGMENTO {i + 1} ===\nFUENTE: {c.metadata.get('source') or c.metadata.get('filename') or 'Desconocido'}\nPAGINA: {c.metadata.get('page', 'N/A')}\n\n{c.content}"  # noqa: E501
+                    for i, c in enumerate(chunks)
                 ]
 
             elif used_tool == "analizar_imagen":

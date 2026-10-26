@@ -213,7 +213,9 @@ class UserInterfaceApplication:
                 ingest_result = gr.Textbox(label="Resultado de ingesta", lines=10, interactive=False)  # noqa: E501
 
                 gr.Markdown("### Fuentes indexadas en Qdrant")
-                sources_dropdown = gr.Dropdown(label="Fuente", choices=[], value=None)
+                sources_dropdown = gr.Dropdown(
+                    label="Fuente", choices=[], value=None, interactive=True
+                )
                 with gr.Row():
                     refresh_sources_btn = gr.Button("Refrescar fuentes")
                     delete_source_btn = gr.Button("Eliminar fuente seleccionada")
@@ -230,6 +232,7 @@ class UserInterfaceApplication:
                     self.clear_sources, None, [sources_dropdown, sources_status]
                 )
 
+                interface.load(self.refresh_sources, outputs=[sources_dropdown])
                 interface.load(self.refresh_sources, None, [sources_dropdown])
                 ingest_btn.click(
                     self.run_ingestion,

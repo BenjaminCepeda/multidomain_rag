@@ -85,7 +85,10 @@ class UserInterfaceApplication:
         return self._presenter.build_status()
 
     def refresh_sources(self) -> Any:
-        sources = self._manage_sources_use_case.list_sources()
+        try:
+            sources = self._manage_sources_use_case.list_sources()
+        except Exception:
+            return gr.update(choices=[], value=None)
         return gr.update(choices=sources, value=sources[0] if sources else None)
 
     def delete_source(self, source: str | None) -> tuple[Any, str]:
@@ -209,12 +212,6 @@ class UserInterfaceApplication:
                 ingest_btn = gr.Button("Ingestar documentos")
                 ingest_result = gr.Textbox(label="Resultado de ingesta", lines=10, interactive=False)  # noqa: E501
 
-                ingest_btn.click(
-                    self.run_ingestion,
-                    inputs=[ingest_files, policy_dropdown],
-                    outputs=[ingest_result],
-                )
-
                 gr.Markdown("### Fuentes indexadas en Qdrant")
                 sources_dropdown = gr.Dropdown(label="Fuente", choices=[], value=None)
                 with gr.Row():
@@ -234,6 +231,11 @@ class UserInterfaceApplication:
                 )
 
                 interface.load(self.refresh_sources, None, [sources_dropdown])
+                ingest_btn.click(
+                    self.run_ingestion,
+                    inputs=[ingest_files, policy_dropdown],
+                    outputs=[ingest_result],
+                ).then(self.refresh_sources, None, [sources_dropdown])
 
             with gr.Tab("Operacion"):
                 chatbot = gr.Chatbot(label="Historial", height=450, type="messages")

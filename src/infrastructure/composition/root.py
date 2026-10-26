@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 
 from src.application.use_cases.ingest_manual import IngestManualUseCase
+from src.application.use_cases.manage_sources import ManageSourcesUseCase
 from src.application.use_cases.orchestrate_agent import OrchestrateAgentUseCase
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.infrastructure.adapters.embedding_adapter import SentenceTransformerEmbeddingAdapter
@@ -22,6 +23,7 @@ class ApplicationContext:
     stt: STTAdapter
     ingest_use_case: IngestManualUseCase
     orchestrate_use_case: OrchestrateAgentUseCase
+    manage_sources_use_case: ManageSourcesUseCase
 
 
 class CompositionRoot:
@@ -50,6 +52,7 @@ class CompositionRoot:
             vector_repo=vector_repo,
             embedding=embedding,
         )
+        manage_sources_uc = ManageSourcesUseCase(repository=vector_repo)
 
         return ApplicationContext(
             settings=self.settings,
@@ -60,4 +63,5 @@ class CompositionRoot:
             stt=stt,
             ingest_use_case=ingest_uc,
             orchestrate_use_case=orchestrate_uc,
+            manage_sources_use_case=manage_sources_uc,
         )

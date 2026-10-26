@@ -161,6 +161,44 @@ class QdrantAdapter(IVectorRepository):
             raise VectorStorageError("Fallo al limpiar la coleccion vectorial.", exc) from exc
         self._ensure_collection()
 
+    def list_sources(self) -> list[str]:
+        self._ensure_collection()
+        sources: set[str] = set()
+        offset = None
+        try:
+            while True:
+                records, offset = self._client.scroll(
+                    collection_name=self._collection_name,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for record in records:
+                    payload = record.payload or {}
+                    source = payload.get("source")
+                    if source:
+                        sources.add(str(source))
+                if offset is None:
+                    break
+        except Exception as exc:
+            raise VectorStorageError("Fallo al listar fuentes vectoriales.", exc) from exc
+        return sorted(sources)
+
+    def delete_by_source(self, source: str) -> None:
+        self._ensure_collection()
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        try:
+            self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=Filter(
+                    must=[FieldCondition(key="source", match=MatchValue(value=source))]
+                ),
+            )
+        except Exception as exc:
+            raise VectorStorageError("Fallo al eliminar la fuente vectorial.", exc) from exc
+
     # --- Backward-compatible helpers ---
     def save_chunks(self, chunks: list[ManualChunk]) -> None:
         vectors = self._embedding.embed_batch([c.content for c in chunks])

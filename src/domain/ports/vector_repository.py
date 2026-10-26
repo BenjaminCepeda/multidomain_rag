@@ -28,3 +28,9 @@ class IVectorRepository(ABC):
 
     @abstractmethod
     def clear(self) -> None: ...
+
+    @abstractmethod
+    def list_sources(self) -> list[str]: ...
+
+    @abstractmethod
+    def delete_by_source(self, source: str) -> None: ...

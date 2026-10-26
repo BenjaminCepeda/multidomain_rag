@@ -25,6 +25,7 @@ class UserInterfaceApplication:
         self._stt_engine = self._ctx.stt
         self._ingest_use_case = self._ctx.ingest_use_case
         self._orchestrate_use_case = self._ctx.orchestrate_use_case
+        self._manage_sources_use_case = self._ctx.manage_sources_use_case
         self._presenter = UIStatePresenter(self._ctx)
 
     def transcribe_audio(self, audio_path: str) -> str:
@@ -82,6 +83,30 @@ class UserInterfaceApplication:
 
     def refresh_status(self) -> str:
         return self._presenter.build_status()
+
+    def refresh_sources(self) -> Any:
+        sources = self._manage_sources_use_case.list_sources()
+        return gr.update(choices=sources, value=sources[0] if sources else None)
+
+    def delete_source(self, source: str | None) -> tuple[Any, str]:
+        if not source:
+            return gr.update(), "No se selecciono una fuente."
+        try:
+            self._manage_sources_use_case.delete_source(source)
+            sources = self._manage_sources_use_case.list_sources()
+            return (
+                gr.update(choices=sources, value=sources[0] if sources else None),
+                f"Fuente eliminada: {source}",
+            )
+        except Exception as e:
+            return gr.update(), f"Error al eliminar: {e!s}"
+
+    def clear_sources(self) -> tuple[Any, str]:
+        try:
+            self._manage_sources_use_case.clear_all()
+            return gr.update(choices=[], value=None), "Todas las fuentes eliminadas."
+        except Exception as e:
+            return gr.update(), f"Error al limpiar: {e!s}"
 
     def run_ingestion(self, files: Any, policy: str) -> Any:
         if not files:
@@ -189,6 +214,26 @@ class UserInterfaceApplication:
                     inputs=[ingest_files, policy_dropdown],
                     outputs=[ingest_result],
                 )
+
+                gr.Markdown("### Fuentes indexadas en Qdrant")
+                sources_dropdown = gr.Dropdown(label="Fuente", choices=[], value=None)
+                with gr.Row():
+                    refresh_sources_btn = gr.Button("Refrescar fuentes")
+                    delete_source_btn = gr.Button("Eliminar fuente seleccionada")
+                    clear_sources_btn = gr.Button("Eliminar todas")
+                sources_status = gr.Textbox(label="Estado de fuentes", lines=2, interactive=False)
+
+                refresh_sources_btn.click(self.refresh_sources, None, [sources_dropdown])
+                delete_source_btn.click(
+                    self.delete_source,
+                    inputs=[sources_dropdown],
+                    outputs=[sources_dropdown, sources_status],
+                )
+                clear_sources_btn.click(
+                    self.clear_sources, None, [sources_dropdown, sources_status]
+                )
+
+                interface.load(self.refresh_sources, None, [sources_dropdown])
 
             with gr.Tab("Operacion"):
                 chatbot = gr.Chatbot(label="Historial", height=450, type="messages")

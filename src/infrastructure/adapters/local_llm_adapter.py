@@ -112,24 +112,37 @@ class LocalLLMAdapter(ILLMEngine):
         context_str = "\n\n".join(context)
 
         system_prompt = (
-            "Eres un asistente tecnico experto. Tu objetivo es la precision absoluta. "
-            "1. Responde UNICAMENTE basandote en el 'Contexto tecnico' proporcionado. "
-            "2. Si la informacion no esta en el contexto, di explicitamente: 'No dispongo de informacion en los manuales'. "  # noqa: E501
-            "3. DEBES incluir la fuente y pagina al final de cada frase tecnica usando el formato: [Archivo, Pag]. "  # noqa: E501
-            "4. NUNCA inventes informacion ni alucines referencias. Si no puedes verificarlo en el contexto, no lo incluyas."  # noqa: E501
+            "Eres un asistente tecnico experto para manuales de impresoras Epson. "
+            "Tu unica fuente de verdad es el Contexto tecnico que se te proporciona. "
+            "Reglas estrictas:\n"
+            "- RESPONDE SIEMPRE con base en el contexto. Si hay informacion relevante, "
+            "aunque sea parcial, usala para elaborar una respuesta util y precisa.\n"
+            "- NO digas 'No dispongo de informacion' si la respuesta se puede inferir "
+            "o encontrar parcialmente en los fragmentos recuperados.\n"
+            "- Explica paso a paso, procedimientos, rutas de menu, nombres de programas "
+            "(Epson Scan 2, Epson Email Print) o configuraciones cuando aparezcan.\n"
+            "- Cita la fuente y la pagina al final de las afirmaciones clave usando "
+            "el formato [Archivo, Pag].\n"
+            "- No inventes pasos, nombres o valores. Solo si tras revisar TODO el contexto "
+            "no hay absolutamente nada relacionado, usa exactamente: "
+            "'No dispongo de informacion en los manuales'.\n"
+            "- Prioriza utilidad practica para el usuario sobre la cautela excesiva."
         )
 
+        user_msg = (
+            f"Contexto tecnico:\n{context_str}\n\n"
+            f"Pregunta del usuario:\n{user_input}\n\n"
+            "Instruccion: Usa UNICAMENTE el contexto anterior. Si existe informacion relacionada, "
+            "genera una respuesta completa y accionable con referencias [Archivo, Pag]."
+        )
         payload = {
             "model": self._model_chat,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"Contexto tecnico:\n{context_str}\n\nPregunta: {user_input}",
-                },
+                {"role": "user", "content": user_msg},
             ],
-            "temperature": 0.1,
-            "max_tokens": 800,
+            "temperature": 0.0,
+            "max_tokens": 1024,
         }
 
         try:

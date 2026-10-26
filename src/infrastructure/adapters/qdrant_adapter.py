@@ -3,7 +3,14 @@ import logging
 from collections.abc import Sequence
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    PointStruct,
+    SparseIndexParams,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
+)
 
 from src.domain.exceptions.core_errors import VectorStorageError
 from src.domain.models.document import ManualChunk
@@ -16,6 +23,9 @@ from src.infrastructure.config.settings import Settings
 logger = logging.getLogger(__name__)
 
 MICRO_BATCH_SIZE = 250
+
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "sparse"
 
 
 class QdrantAdapter(IVectorRepository):
@@ -32,6 +42,12 @@ class QdrantAdapter(IVectorRepository):
         self._embedding: IEmbeddingService = embedding or SentenceTransformerEmbeddingAdapter(
             settings=settings
         )
+        try:
+            from fastembed import SparseTextEmbedding
+
+            self._sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+        except Exception:
+            self._sparse_model = None
 
         location = settings.qdrant_url.strip()
         if location.startswith("http://") or location.startswith("https://"):
@@ -64,7 +80,14 @@ class QdrantAdapter(IVectorRepository):
             if not self._client.collection_exists(collection_name=self._collection_name):
                 self._client.create_collection(
                     collection_name=self._collection_name,
-                    vectors_config=VectorParams(size=self._vector_dim, distance=Distance.COSINE),
+                    vectors_config={
+                        DENSE_VECTOR_NAME: VectorParams(
+                            size=self._vector_dim, distance=Distance.COSINE
+                        )
+                    },
+                    sparse_vectors_config={
+                        SPARSE_VECTOR_NAME: SparseVectorParams(index=SparseIndexParams())
+                    },
                 )
         except Exception as exc:
             raise VectorStorageError(
@@ -87,29 +110,52 @@ class QdrantAdapter(IVectorRepository):
             end = min(start + MICRO_BATCH_SIZE, total)
             batch_chunks = list(chunks[start:end])
             batch_vectors = list(vectors[start:end])
-            points = [
-                PointStruct(
-                    id=start + idx,
-                    vector=vec.to_list(),
-                    payload={
-                        "chunk_id": str(chunk.chunk_id),
-                        "content": chunk.content,
-                        "is_visual": bool(chunk.is_visual),
-                        "page": int(chunk.page),
-                        "section": chunk.section,
-                        "document_id": str(chunk.document_id) if chunk.document_id else None,
-                        "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
-                        "filename": chunk.metadata.get("filename")
-                        or (
-                            str(chunk.metadata.get("source")).split("/")[-1]
-                            if chunk.metadata.get("source")
-                            else None
-                        ),
-                        **chunk.metadata,
-                    },
+            batch_texts = [chunk.content for chunk in batch_chunks]
+            sparse_embeddings = []
+            if self._sparse_model is not None:
+                try:
+                    sparse_embeddings = list(self._sparse_model.embed(batch_texts))
+                except Exception:
+                    sparse_embeddings = []
+            points = []
+            for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False)):
+                sparse_emb = sparse_embeddings[idx] if idx < len(sparse_embeddings) else None
+                vector_payload: dict[str, object] = {DENSE_VECTOR_NAME: vec.to_list()}
+                if sparse_emb is not None:
+                    try:
+                        sparse_dict = sparse_emb.as_dict()
+                        indices = sparse_dict.get("indices") or sparse_dict.get("id") or []
+                        values = sparse_dict.get("values") or sparse_dict.get("value") or []
+                        if indices and values:
+                            vector_payload[SPARSE_VECTOR_NAME] = SparseVector(
+                                indices=[int(i) for i in indices],
+                                values=[float(v) for v in values],
+                            )
+                    except Exception:
+                        pass
+                points.append(
+                    PointStruct(
+                        id=start + idx,
+                        vector=vector_payload,  # type: ignore[arg-type]
+                        payload={
+                            "chunk_id": str(chunk.chunk_id),
+                            "content": chunk.content,
+                            "is_visual": bool(chunk.is_visual),
+                            "page": int(chunk.page),
+                            "section": chunk.section,
+                            "document_id": str(chunk.document_id) if chunk.document_id else None,
+                            "source": chunk.metadata.get("source")
+                            or chunk.metadata.get("filename"),
+                            "filename": chunk.metadata.get("filename")
+                            or (
+                                str(chunk.metadata.get("source")).split("/")[-1]
+                                if chunk.metadata.get("source")
+                                else None
+                            ),
+                            **chunk.metadata,
+                        },
+                    )
                 )
-                for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False))
-            ]
             try:
                 self._client.upsert(collection_name=self._collection_name, points=points)
                 logger.info(
@@ -125,33 +171,96 @@ class QdrantAdapter(IVectorRepository):
     ) -> list[ManualChunk]:
         self._ensure_collection()
         try:
-            results = self._client.search(
+            dense_results = self._client.search(
                 collection_name=self._collection_name,
-                query_vector=query_vector.to_list(),
-                limit=limit,
+                query_vector=(DENSE_VECTOR_NAME, query_vector.to_list()),
+                limit=limit * 4,
             )
-            valid_results: list[ManualChunk] = []
-            for hit in results:
-                if hit.score < min_score:
-                    continue
-                payload = hit.payload or {}
-                from src.domain.models.ids import ChunkId
-
-                chunk_id_raw = payload.get("chunk_id") or str(hit.id)
-                valid_results.append(
-                    ManualChunk(
-                        chunk_id=ChunkId(str(chunk_id_raw)),
-                        content=str(payload.get("content", "")),
-                        is_visual=bool(payload.get("is_visual", False)),
-                        page=int(payload.get("page", 1)) if payload.get("page") is not None else 1,
-                        section=payload.get("section"),
-                        metadata=payload,
-                    )
+        except Exception:
+            try:
+                dense_results = self._client.search(
+                    collection_name=self._collection_name,
+                    query_vector=query_vector.to_list(),
+                    limit=limit * 4,
                 )
-            return valid_results
-        except Exception as exc:
-            logger.error(f"Error critico en ejecucion vectorial: {exc!s}")
-            raise VectorStorageError("Fallo en la ejecucion de consulta vectorial.", exc) from exc
+            except Exception as exc:
+                logger.error(f"Error critico en ejecucion vectorial: {exc!s}")
+                raise VectorStorageError(
+                    "Fallo en la ejecucion de consulta vectorial.", exc
+                ) from exc
+
+        sparse_results = []
+        if self._sparse_model is not None:
+            try:
+                from qdrant_client.models import NamedSparseVector, SparseVector
+
+                sparse_embeddings = list(self._sparse_model.embed([""]))
+                sparse_dict = sparse_embeddings[0].as_dict()
+                indices = sparse_dict.get("indices") or sparse_dict.get("id") or []
+                values = sparse_dict.get("values") or sparse_dict.get("value") or []
+                if indices and values:
+                    sparse_results = self._client.search(
+                        collection_name=self._collection_name,
+                        query_vector=NamedSparseVector(
+                            name=SPARSE_VECTOR_NAME,
+                            vector=SparseVector(
+                                indices=[int(i) for i in indices],
+                                values=[float(v) for v in values],
+                            ),
+                        ),
+                        limit=limit * 4,
+                    )
+            except Exception as exc:
+                logger.warning(f"Sparse search failed, falling back to dense only: {exc}")
+
+        scores: dict[str, float] = {}
+        payloads: dict[str, dict[str, object]] = {}
+        for rank, hit in enumerate(dense_results):
+            key = str(hit.id)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (60.0 + rank + 1.0)
+            payloads[key] = hit.payload or {}
+        for rank, hit in enumerate(sparse_results):
+            key = str(hit.id)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (60.0 + rank + 1.0)
+            if key not in payloads:
+                payloads[key] = hit.payload or {}
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
+        valid_results: list[ManualChunk] = []
+        from src.domain.models.ids import ChunkId
+
+        for key, _rrf_score in ranked:
+            payload_raw = payloads.get(key) or {}
+            chunk_id_raw = payload_raw.get("chunk_id") or key
+            page_val = payload_raw.get("page", 1)
+            try:
+                if page_val is None:
+                    page_int = 1
+                elif isinstance(page_val, int):
+                    page_int = page_val
+                elif isinstance(page_val, float):
+                    page_int = int(page_val)
+                else:
+                    page_int = int(str(page_val))
+            except Exception:
+                page_int = 1
+            section_val = payload_raw.get("section")
+            section_str = str(section_val) if section_val is not None else None
+            metadata_dict: dict[str, str | int | float | bool] = {}
+            for k, v in payload_raw.items():
+                if isinstance(v, str | int | float | bool):
+                    metadata_dict[k] = v
+            valid_results.append(
+                ManualChunk(
+                    chunk_id=ChunkId(str(chunk_id_raw)),
+                    content=str(payload_raw.get("content", "")),
+                    is_visual=bool(payload_raw.get("is_visual", False)),
+                    page=page_int,
+                    section=section_str,
+                    metadata=metadata_dict,
+                )
+            )
+        return valid_results
 
     def count(self) -> int:
         self._ensure_collection()

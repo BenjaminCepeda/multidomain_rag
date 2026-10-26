@@ -94,10 +94,17 @@ class QdrantAdapter(IVectorRepository):
                     payload={
                         "chunk_id": str(chunk.chunk_id),
                         "content": chunk.content,
-                        "is_visual": chunk.is_visual,
-                        "page": chunk.page,
+                        "is_visual": bool(chunk.is_visual),
+                        "page": int(chunk.page),
                         "section": chunk.section,
                         "document_id": str(chunk.document_id) if chunk.document_id else None,
+                        "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
+                        "filename": chunk.metadata.get("filename")
+                        or (
+                            str(chunk.metadata.get("source")).split("/")[-1]
+                            if chunk.metadata.get("source")
+                            else None
+                        ),
                         **chunk.metadata,
                     },
                 )
@@ -177,7 +184,7 @@ class QdrantAdapter(IVectorRepository):
                 )
                 for record in records:
                     payload = record.payload or {}
-                    source = payload.get("source") or payload.get("filename")
+                    source = payload.get("source")
                     if source:
                         sources.add(str(source))
                 if next_offset is None or next_offset == offset or next_offset in seen_offsets:
@@ -196,9 +203,8 @@ class QdrantAdapter(IVectorRepository):
             self._client.delete(
                 collection_name=self._collection_name,
                 points_selector=Filter(
-                    should=[
+                    must=[
                         FieldCondition(key="source", match=MatchValue(value=source)),
-                        FieldCondition(key="filename", match=MatchValue(value=source)),
                     ]
                 ),
             )

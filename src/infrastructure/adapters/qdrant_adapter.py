@@ -165,9 +165,10 @@ class QdrantAdapter(IVectorRepository):
         self._ensure_collection()
         sources: set[str] = set()
         offset = None
+        seen_offsets: set[object] = set()
         try:
             while True:
-                records, offset = self._client.scroll(
+                records, next_offset = self._client.scroll(
                     collection_name=self._collection_name,
                     limit=256,
                     offset=offset,
@@ -176,11 +177,13 @@ class QdrantAdapter(IVectorRepository):
                 )
                 for record in records:
                     payload = record.payload or {}
-                    source = payload.get("source")
+                    source = payload.get("source") or payload.get("filename")
                     if source:
                         sources.add(str(source))
-                if offset is None:
+                if next_offset is None or next_offset == offset or next_offset in seen_offsets:
                     break
+                seen_offsets.add(next_offset)
+                offset = next_offset
         except Exception as exc:
             raise VectorStorageError("Fallo al listar fuentes vectoriales.", exc) from exc
         return sorted(sources)
@@ -193,7 +196,10 @@ class QdrantAdapter(IVectorRepository):
             self._client.delete(
                 collection_name=self._collection_name,
                 points_selector=Filter(
-                    must=[FieldCondition(key="source", match=MatchValue(value=source))]
+                    should=[
+                        FieldCondition(key="source", match=MatchValue(value=source)),
+                        FieldCondition(key="filename", match=MatchValue(value=source)),
+                    ]
                 ),
             )
         except Exception as exc:

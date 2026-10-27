@@ -11,11 +11,11 @@ from src.domain.models.document import ManualChunk
 from src.domain.ports.document_extractor import IDocumentExtractor
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.vector_repository import IVectorRepository
+from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
 MICRO_BATCH_SIZE = 250
-MAX_WORKERS = 4
 
 
 class IngestManualUseCase:
@@ -26,10 +26,13 @@ class IngestManualUseCase:
         extractor: IDocumentExtractor,
         repository: IVectorRepository,
         embedding: IEmbeddingService,
+        settings: Settings | None = None,
     ) -> None:
         self._extractor: IDocumentExtractor = extractor
         self._repository: IVectorRepository = repository
         self._embedding: IEmbeddingService = embedding
+        self._settings = settings or Settings()
+        self._max_workers = int(getattr(self._settings, "ingest_max_workers", 4))
 
     def _process_file(self, path_str: str) -> tuple[str, list[ManualChunk], int, int]:
         images_count = 0
@@ -107,7 +110,11 @@ class IngestManualUseCase:
                 duration_seconds=time.perf_counter() - start_time,
             )
 
-        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, total_files)) as executor:
+        max_workers = min(self._max_workers, total_files)
+        logger.info(
+            "INGEST_CONFIG | max_workers=%d (source=settings.ingest_max_workers)", max_workers
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self._process_file, p): p
                 for p in valid_paths

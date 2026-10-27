@@ -1,4 +1,5 @@
 # src/infrastructure/adapters/embedding_adapter.py
+import logging
 import os
 from collections.abc import Sequence
 
@@ -7,10 +8,13 @@ from sentence_transformers import SentenceTransformer
 from src.domain.models.embedding import EmbeddingVector
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.infrastructure.config.settings import Settings
+from src.infrastructure.hardware.device_factory import DeviceFactory
+
+logger = logging.getLogger(__name__)
 
 
 class SentenceTransformerEmbeddingAdapter(IEmbeddingService):
-    """Embedding adapter backed by sentence-transformers."""
+    """Embedding adapter backed by sentence-transformers with hardware acceleration."""
 
     def __init__(
         self,
@@ -27,7 +31,26 @@ class SentenceTransformerEmbeddingAdapter(IEmbeddingService):
         self._model_name = model_name or "BAAI/bge-m3"
         self._expected_dim = expected_dim
         cache = cache_folder or os.getenv("HF_MODEL_CACHE")
-        self._model = SentenceTransformer(self._model_name, cache_folder=cache)
+        device = "cpu"
+        try:
+            device = DeviceFactory.configure_sentence_transformers_device()
+        except Exception as exc:
+            logger.warning("DeviceFactory failed for embeddings, fallback to cpu: %s", exc)
+            device = "cpu"
+        try:
+            self._model = SentenceTransformer(self._model_name, cache_folder=cache, device=device)
+            logger.info("Embeddings loaded on device=%s", device)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load embeddings on device=%s, falling back to cpu: %s", device, exc
+            )
+            try:
+                self._model = SentenceTransformer(
+                    self._model_name, cache_folder=cache, device="cpu"
+                )
+                logger.info("Embeddings loaded on device=cpu (fallback)")
+            except Exception as exc2:
+                raise exc2
 
     def embed_text(self, text: str) -> EmbeddingVector:
         vector = self._model.encode(text)

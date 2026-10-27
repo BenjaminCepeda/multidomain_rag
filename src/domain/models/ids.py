@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,19 @@ class ChunkId:
             raise ValueError("index must be >= 0")
         section_part = (section or "root").strip().lower().replace(" ", "_")
         return cls(value=f"{document_id}:{section_part}:{page}:{index}")
+
+    @classmethod
+    def from_content(
+        cls,
+        document_id: DocumentId,
+        content: str,
+        page: int,
+        section: str | None = None,
+        image_paths: str | None = None,
+    ) -> ChunkId:
+        seed = f"{document_id}|{section or 'root'}|{page}|{content}|{image_paths or ''}"
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+        return cls(value=f"{document_id}:sha256:{digest}")
 
     def __str__(self) -> str:
         return self.value

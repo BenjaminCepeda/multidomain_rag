@@ -117,7 +117,7 @@ class QdrantAdapter(IVectorRepository):
                     sparse_embeddings = list(self._sparse_model.embed(batch_texts))
                 except Exception:
                     sparse_embeddings = []
-                points = []
+            points: list[PointStruct] = []
             for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False)):
                 sparse_emb = sparse_embeddings[idx] if idx < len(sparse_embeddings) else None
                 vector_payload: dict[str, object] = {DENSE_VECTOR_NAME: vec.to_list()}

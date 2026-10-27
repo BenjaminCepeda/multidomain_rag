@@ -23,12 +23,12 @@ class DeviceFactory:
     @staticmethod
     def get_preferred_providers() -> list[tuple[str, str]]:
         providers: list[tuple[str, str]] = []
-        # NPU/GPU first, CPU last
-        providers.append(("DirectMLExecutionProvider", "directml"))
+        # NPU/GPU first, CPU last - prefer DirectML for AMD/Intel integrated NPU+GPU
         providers.append(("DmlExecutionProvider", "directml"))
+        providers.append(("DirectMLExecutionProvider", "directml"))
+        providers.append(("OpenVINOExecutionProvider", "openvino"))
         providers.append(("CUDAExecutionProvider", "cuda"))
         providers.append(("ROCMExecutionProvider", "rocm"))
-        providers.append(("OpenVINOExecutionProvider", "openvino"))
         providers.append(("AzureExecutionProvider", "azure"))
         providers.append(("CPUExecutionProvider", "cpu"))
         return providers
@@ -40,6 +40,7 @@ class DeviceFactory:
             import onnxruntime as ort
 
             available = ort.get_available_providers()
+            logger.info("ORT_AVAILABLE_PROVIDERS: %s", available)
             for provider, dev in DeviceFactory.get_preferred_providers():
                 if provider in available:
                     devices.append(DeviceInfo(provider=provider, device=dev, available=True))
@@ -67,9 +68,19 @@ class DeviceFactory:
             import onnxruntime as ort
 
             available = ort.get_available_providers()
+            logger.info("HARDWARE_AUDIT | ORT_AVAILABLE_PROVIDERS=%s", available)
             for provider, dev in cls.get_preferred_providers():
                 if provider != "CPUExecutionProvider" and provider in available:
+                    logger.info(
+                        "HARDWARE_AUDIT | SELECTED_PROVIDER=%s | DEVICE=%s | PRIORITY=accelerated",
+                        provider,
+                        dev,
+                    )
                     return provider, dev
+            logger.info(
+                "HARDWARE_AUDIT | SELECTED_PROVIDER=CPUExecutionProvider | "
+                "DEVICE=cpu | PRIORITY=fallback"
+            )
         except Exception as exc:
             logger.warning("Falling back to CPU due to device detection error: %s", exc)
         return "CPUExecutionProvider", "cpu"

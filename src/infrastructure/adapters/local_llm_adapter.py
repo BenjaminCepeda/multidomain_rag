@@ -1,8 +1,10 @@
 # src/infrastructure/adapters/local_llm_adapter.py
 import base64
 import json
+import logging
 import os
 import re
+import time
 from collections.abc import Sequence
 
 import requests
@@ -11,6 +13,8 @@ from src.domain.exceptions.core_errors import DataIncompleteError, LLMInferenceE
 from src.domain.models.agent import OrchestratorDecision
 from src.domain.ports.llm_engine import ILLMEngine
 from src.infrastructure.config.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class LocalLLMAdapter(ILLMEngine):
@@ -31,7 +35,7 @@ class LocalLLMAdapter(ILLMEngine):
         self._endpoint = (endpoint or "http://127.0.0.1:1234/v1").rstrip("/")
         self._model_chat = model_chat or "qwen3-14b"
         self._model_vision = model_vision or "qwen3-14b"
-        self._timeout = timeout or 60
+        self._timeout = int(timeout) if timeout is not None else 60
         self._headers = {"Content-Type": "application/json"}
 
     def check_health(self) -> bool:
@@ -145,17 +149,60 @@ class LocalLLMAdapter(ILLMEngine):
             "max_tokens": 1024,
         }
 
+        logger.info(
+            "LLM_TRACE generate_response | fragments=%d | context_chars=%d | user_msg_chars=%d "
+            "| timeout_s=%d | endpoint=%s | model=%s",
+            len(context),
+            len(context_str),
+            len(user_msg),
+            self._timeout,
+            self._endpoint,
+            self._model_chat,
+        )
+        logger.debug("LLM_TRACE SYSTEM_PROMPT >>>\n%s\n<<< END SYSTEM_PROMPT", system_prompt)
+        logger.debug("LLM_TRACE USER_MSG >>>\n%s\n<<< END USER_MSG", user_msg)
+
+        start_ts = time.perf_counter()
         try:
             response = requests.post(
                 url, json=payload, headers=self._headers, timeout=self._timeout
             )
             response.raise_for_status()
         except requests.exceptions.Timeout as exc:
+            elapsed = time.perf_counter() - start_ts
+            logger.error(
+                "LLM_TRACE TIMEOUT after %.3fs (%.0fms) | fragments=%d | context_chars=%d",
+                elapsed,
+                elapsed * 1000,
+                len(context),
+                len(context_str),
+            )
             raise LLMInferenceError("Timeout en inferencia del LLM local.", exc) from exc
         except requests.exceptions.ConnectionError as exc:
+            elapsed = time.perf_counter() - start_ts
+            logger.error(
+                "LLM_TRACE CONNECTION_ERROR after %.3fs | endpoint=%s",
+                elapsed,
+                self._endpoint,
+            )
             raise LLMInferenceError("No se pudo conectar al LLM local.", exc) from exc
         except requests.exceptions.RequestException as exc:
+            elapsed = time.perf_counter() - start_ts
+            logger.error(
+                "LLM_TRACE REQUEST_ERROR after %.3fs | %s",
+                elapsed,
+                exc,
+            )
             raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
+        elapsed = time.perf_counter() - start_ts
+        logger.info(
+            "LLM_TRACE RESPONSE_OK | latency_s=%.3f | latency_ms=%.0f | fragments=%d "
+            "| context_chars=%d",
+            elapsed,
+            elapsed * 1000,
+            len(context),
+            len(context_str),
+        )
         return str(response.json()["choices"][0]["message"]["content"]).strip()
 
     def analyze_image(self, image_path: str) -> str:

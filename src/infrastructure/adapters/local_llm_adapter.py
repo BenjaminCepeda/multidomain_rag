@@ -51,6 +51,15 @@ class LocalLLMAdapter(ILLMEngine):
         adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
+        try:
+            from src.infrastructure.hardware.device_factory import DeviceFactory
+
+            provider, dev = DeviceFactory.select_device()
+            logger.info(
+                "LLM hardware context: provider=%s device=%s (local HTTP inference)", provider, dev
+            )
+        except Exception as exc:
+            logger.warning("LLM hardware detection skipped: %s", exc)
 
     def check_health(self) -> bool:
         try:

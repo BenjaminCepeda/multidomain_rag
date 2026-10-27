@@ -1,5 +1,6 @@
 # src/application/use_cases/ingest_manual.py
 import logging
+import os
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -61,6 +62,7 @@ class IngestManualUseCase:
 
         all_chunks: list[ManualChunk] = []
         file_success: dict[str, bool] = {}
+        points: list[object] = []
 
         if total_files == 0:
             return IngestionResultDTO(
@@ -71,10 +73,44 @@ class IngestManualUseCase:
                 duration_seconds=time.perf_counter() - start_time,
             )
 
+        valid_paths: list[str] = []
+        for p in request.file_paths:
+            try:
+                pstr = str(p)
+                if not pstr:
+                    controlled_exceptions += 1
+                    failed_files.append(pstr)
+                    continue
+                if not os.path.exists(pstr):
+                    logger.warning("Archivo huérfano o inexistente, se omite: %s", pstr)
+                    controlled_exceptions += 1
+                    failed_files.append(pstr)
+                    continue
+                if not os.path.isfile(pstr):
+                    logger.warning("Ruta no es un archivo, se omite: %s", pstr)
+                    controlled_exceptions += 1
+                    failed_files.append(pstr)
+                    continue
+                valid_paths.append(pstr)
+            except Exception as exc:
+                logger.warning("Error al validar ruta de archivo: %s", exc)
+                controlled_exceptions += 1
+                continue
+
+        total_files = len(valid_paths)
+        if total_files == 0:
+            return IngestionResultDTO(
+                documents_processed=0,
+                chunks_indexed=0,
+                skipped_duplicates=0,
+                failed_files=tuple(sorted(set(failed_files))),
+                duration_seconds=time.perf_counter() - start_time,
+            )
+
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, total_files)) as executor:
             futures = {
-                executor.submit(self._process_file, str(p)): str(p)
-                for p in request.file_paths
+                executor.submit(self._process_file, p): p
+                for p in valid_paths
             }
             for fut in as_completed(futures):
                 path_str = futures[fut]
@@ -102,6 +138,7 @@ class IngestManualUseCase:
                     vectors = self._embedding.embed_batch([c.content for c in batch])
                     self._repository.upsert(batch, vectors)
                     indexed_chunks += len(batch)
+                    points.extend(batch)
                     if progress_callback:
                         overall = (end / total_chunks) * 0.99
                         msg = f"Indexando lote {end}/{total_chunks}"

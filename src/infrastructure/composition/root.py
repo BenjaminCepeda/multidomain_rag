@@ -46,6 +46,7 @@ class CompositionRoot:
             extractor=extractor,
             repository=vector_repo,
             embedding=embedding,
+            settings=self.settings,
         )
         orchestrate_uc = OrchestrateAgentUseCase(
             llm_engine=llm,

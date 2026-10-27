@@ -113,9 +113,15 @@ class UserInterfaceApplication:
 
     def clear_sources(self) -> tuple[Any, str]:
         try:
+            logging.info("UI_PURGE | action=clear_all_sources | status=started")
             self._manage_sources_use_case.clear_all()
-            return gr.update(choices=[], value=None), "Todas las fuentes eliminadas."
+            logging.info("UI_PURGE | action=clear_all_sources | status=completed")
+            return (
+                gr.update(choices=[], value=None),
+                "Todas las fuentes eliminadas (Qdrant purgado).",
+            )
         except Exception as e:
+            logging.error("UI_PURGE | action=clear_all_sources | status=failed | error=%s", e)
             return gr.update(), f"Error al limpiar: {e!s}"
 
     def run_ingestion(self, files: Any, policy: str) -> Any:

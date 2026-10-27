@@ -303,9 +303,16 @@ class QdrantAdapter(IVectorRepository):
         try:
             if self._client.collection_exists(collection_name=self._collection_name):
                 self._client.delete_collection(collection_name=self._collection_name)
+                logger.info("QDRANT_PURGE | collection=%s | action=deleted", self._collection_name)
         except Exception as exc:
+            logger.error(
+                "QDRANT_PURGE | collection=%s | action=delete_failed | error=%s",
+                self._collection_name,
+                exc,
+            )
             raise VectorStorageError("Fallo al limpiar la coleccion vectorial.", exc) from exc
         self._ensure_collection()
+        logger.info("QDRANT_PURGE | collection=%s | action=recreated_empty", self._collection_name)
 
     def list_sources(self) -> list[str]:
         self._ensure_collection()

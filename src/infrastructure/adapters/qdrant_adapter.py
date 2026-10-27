@@ -117,47 +117,68 @@ class QdrantAdapter(IVectorRepository):
                     sparse_embeddings = list(self._sparse_model.embed(batch_texts))
                 except Exception:
                     sparse_embeddings = []
-            points = []
-        for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False)):
-            sparse_emb = sparse_embeddings[idx] if idx < len(sparse_embeddings) else None
-            vector_payload: dict[str, object] = {DENSE_VECTOR_NAME: vec.to_list()}
-            if sparse_emb is not None:
+                points = []
+            for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False)):
+                sparse_emb = sparse_embeddings[idx] if idx < len(sparse_embeddings) else None
+                vector_payload: dict[str, object] = {DENSE_VECTOR_NAME: vec.to_list()}
+                if sparse_emb is not None:
+                    try:
+                        sparse_dict = sparse_emb.as_dict()
+                        indices = sparse_dict.get("indices") or sparse_dict.get("id") or []
+                        values = sparse_dict.get("values") or sparse_dict.get("value") or []
+                        if indices and values:
+                            vector_payload[SPARSE_VECTOR_NAME] = SparseVector(
+                                indices=[int(i) for i in indices],
+                                values=[float(v) for v in values],
+                            )
+                    except Exception:
+                        pass
+                payload_dict = {
+                    "chunk_id": str(chunk.chunk_id),
+                    "content": chunk.content,
+                    "is_visual": bool(chunk.is_visual),
+                    "page": int(chunk.page),
+                    "section": chunk.section,
+                    "document_id": str(chunk.document_id) if chunk.document_id else None,
+                    "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
+                    "filename": chunk.metadata.get("filename")
+                    or (
+                        str(chunk.metadata.get("source")).split("/")[-1]
+                        if chunk.metadata.get("source")
+                        else None
+                    ),
+                }
+                for k, v in chunk.metadata.items():
+                    if isinstance(v, str | int | float | bool) and k not in payload_dict:
+                        payload_dict[k] = v
+                    elif k == "image_paths" and isinstance(v, str):
+                        payload_dict["image_paths"] = v
+                import uuid
+
+                from src.domain.models.ids import ChunkId, DocumentId
+
+                doc_id_for_hash = (
+                    chunk.document_id if chunk.document_id is not None
+                    else DocumentId.from_source(str(uuid.uuid4()))
+                )
+                img_paths_hash = payload_dict.get("image_paths")
+                img_h = img_paths_hash if isinstance(img_paths_hash, str) else None
+                point_id = ChunkId.from_content(
+                    doc_id_for_hash,
+                    str(chunk.content),
+                    int(chunk.page),
+                    chunk.section,
+                    img_h,
+                )
                 try:
-                    sparse_dict = sparse_emb.as_dict()
-                    indices = sparse_dict.get("indices") or sparse_dict.get("id") or []
-                    values = sparse_dict.get("values") or sparse_dict.get("value") or []
-                    if indices and values:
-                        vector_payload[SPARSE_VECTOR_NAME] = SparseVector(
-                            indices=[int(i) for i in indices],
-                            values=[float(v) for v in values],
-                        )
+                    point_id_int = abs(hash(str(point_id))) % (10**12)
                 except Exception:
-                    pass
-            payload_dict = {
-                "chunk_id": str(chunk.chunk_id),
-                "content": chunk.content,
-                "is_visual": bool(chunk.is_visual),
-                "page": int(chunk.page),
-                "section": chunk.section,
-                "document_id": str(chunk.document_id) if chunk.document_id else None,
-                "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
-                "filename": chunk.metadata.get("filename")
-                or (
-                    str(chunk.metadata.get("source")).split("/")[-1]
-                    if chunk.metadata.get("source")
-                    else None
-                ),
-            }
-            for k, v in chunk.metadata.items():
-                if isinstance(v, str | int | float | bool) and k not in payload_dict:
-                    payload_dict[k] = v
-                elif k == "image_paths" and isinstance(v, str):
-                    payload_dict["image_paths"] = v
-            points.append(
-                PointStruct(
-                    id=start + idx,
-                    vector=vector_payload,  # type: ignore[arg-type]
-                    payload=payload_dict,
+                    point_id_int = start + idx
+                points.append(
+                    PointStruct(
+                        id=point_id_int,
+                        vector=vector_payload,  # type: ignore[arg-type]
+                        payload=payload_dict,
                     )
                 )
             try:

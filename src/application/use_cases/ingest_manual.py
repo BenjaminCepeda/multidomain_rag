@@ -1,10 +1,12 @@
 # src/application/use_cases/ingest_manual.py
 import logging
-import os
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from src.application.dtos.ingestion_dtos import IngestionRequestDTO, IngestionResultDTO
+from src.domain.models.document import ManualChunk
 from src.domain.ports.document_extractor import IDocumentExtractor
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.vector_repository import IVectorRepository
@@ -12,6 +14,7 @@ from src.domain.ports.vector_repository import IVectorRepository
 logger = logging.getLogger(__name__)
 
 MICRO_BATCH_SIZE = 250
+MAX_WORKERS = 4
 
 
 class IngestManualUseCase:
@@ -27,6 +30,22 @@ class IngestManualUseCase:
         self._repository: IVectorRepository = repository
         self._embedding: IEmbeddingService = embedding
 
+    def _process_file(self, path_str: str) -> tuple[str, list[ManualChunk], int, int]:
+        images_count = 0
+        try:
+            chunks = self._extractor.extract_chunks(path_str)
+            for c in chunks:
+                try:
+                    img_paths = c.metadata.get("image_paths")
+                    if img_paths and isinstance(img_paths, str):
+                        images_count += len([p for p in img_paths.split("|") if p])
+                except Exception:
+                    pass
+            return path_str, chunks, len(chunks), images_count
+        except Exception as e:
+            logger.error(f"Error critico procesando {path_str}: {e!s}")
+            raise
+
     def execute(
         self,
         request: IngestionRequestDTO,
@@ -35,46 +54,15 @@ class IngestManualUseCase:
         failed_files: list[str] = []
         total_files = len(request.file_paths)
         indexed_chunks = 0
+        total_images = 0
+        controlled_exceptions = 0
         start_time = time.perf_counter()
+        lock = Lock()
 
-        for i, path in enumerate(request.file_paths):
-            path_str = str(path)
-            try:
-                if progress_callback:
-                    progress_callback(
-                        (i / total_files) if total_files else 0.0,
-                        f"Extrayendo: {os.path.basename(path_str)}",
-                    )
+        all_chunks: list[ManualChunk] = []
+        file_success: dict[str, bool] = {}
 
-                logger.info(f"Iniciando extraccion para: {path_str}")
-                chunks = self._extractor.extract_chunks(path_str)
-
-                if chunks:
-                    logger.info(f"Extraccion exitosa: {len(chunks)} chunks de {path_str}")
-                    # Micro-batched embedding + upsert to avoid heavy monolithic transactions.
-                    for start in range(0, len(chunks), MICRO_BATCH_SIZE):
-                        end = min(start + MICRO_BATCH_SIZE, len(chunks))
-                        batch = chunks[start:end]
-                        vectors = self._embedding.embed_batch([c.content for c in batch])
-                        self._repository.upsert(batch, vectors)
-                        indexed_chunks += len(batch)
-                        if progress_callback:
-                            file_progress = (start + len(batch)) / len(chunks)
-                            overall = (i + file_progress) / total_files if total_files else 1.0
-                            progress_callback(
-                                min(overall, 0.99),
-                                f"Indexando: {os.path.basename(path_str)} ({end}/{len(chunks)})",
-                            )
-                else:
-                    logger.warning(f"El archivo {path_str} no devolvio fragmentos.")
-
-            except Exception as e:
-                logger.error(f"Error critico procesando {path_str}: {e!s}")
-                failed_files.append(path_str)
-                continue
-
-        if indexed_chunks == 0 and not failed_files:
-            logger.warning("No se pudieron extraer fragmentos de ningun archivo.")
+        if total_files == 0:
             return IngestionResultDTO(
                 documents_processed=0,
                 chunks_indexed=0,
@@ -83,13 +71,66 @@ class IngestManualUseCase:
                 duration_seconds=time.perf_counter() - start_time,
             )
 
+        with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, total_files)) as executor:
+            futures = {
+                executor.submit(self._process_file, str(p)): str(p)
+                for p in request.file_paths
+            }
+            for fut in as_completed(futures):
+                path_str = futures[fut]
+                try:
+                    path_res, chunks, c_count, i_count = fut.result()
+                    with lock:
+                        file_success[path_res] = True
+                        if chunks:
+                            all_chunks.extend(chunks)
+                        total_images += i_count
+                    logger.info(f"Extraccion exitosa: {c_count} chunks de {path_res}")
+                except Exception:
+                    with lock:
+                        file_success[path_str] = False
+                        failed_files.append(path_str)
+                        controlled_exceptions += 1
+                    continue
+
+        if all_chunks:
+            total_chunks = len(all_chunks)
+            for start in range(0, total_chunks, MICRO_BATCH_SIZE):
+                end = min(start + MICRO_BATCH_SIZE, total_chunks)
+                batch = all_chunks[start:end]
+                try:
+                    vectors = self._embedding.embed_batch([c.content for c in batch])
+                    self._repository.upsert(batch, vectors)
+                    indexed_chunks += len(batch)
+                    if progress_callback:
+                        overall = (end / total_chunks) * 0.99
+                        msg = f"Indexando lote {end}/{total_chunks}"
+                        progress_callback(min(overall, 0.99), msg)
+                except Exception as e:
+                    logger.error(f"Error en batch upsert: {e!s}")
+                    controlled_exceptions += 1
+                    continue
+
         if progress_callback:
             progress_callback(1.0, "Persistencia completada.")
 
+        documents_processed = sum(1 for v in file_success.values() if v)
+        duration_seconds = time.perf_counter() - start_time
+        logger.info(
+            "INGEST_METRICS | total_s=%.3f | files_ok=%d | files_fail=%d "
+            "| chunks=%d | images=%d | exceptions=%d",
+            duration_seconds,
+            documents_processed,
+            len(failed_files),
+            indexed_chunks,
+            total_images,
+            controlled_exceptions,
+        )
+
         return IngestionResultDTO(
-            documents_processed=total_files - len(failed_files),
+            documents_processed=documents_processed,
             chunks_indexed=indexed_chunks,
             skipped_duplicates=0,
-            failed_files=tuple(failed_files),
-            duration_seconds=time.perf_counter() - start_time,
+            failed_files=tuple(sorted(set(failed_files))),
+            duration_seconds=duration_seconds,
         )

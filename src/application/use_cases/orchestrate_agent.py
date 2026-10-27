@@ -61,10 +61,15 @@ class OrchestrateAgentUseCase:
                 else:
                     logger.info(f"Recuperados {len(chunks)} fragmentos.")
 
-                contexto_sintesis = [
-                    f"=== FRAGMENTO {i + 1} ===\nFUENTE: {c.metadata.get('source') or c.metadata.get('filename') or 'Desconocido'}\nPAGINA: {c.metadata.get('page', 'N/A')}\n\n{c.content}"  # noqa: E501
-                    for i, c in enumerate(chunks)
-                ]
+                contexto_sintesis = []
+                for i, c in enumerate(chunks):
+                    src = c.metadata.get("source") or c.metadata.get("filename") or "Desconocido"
+                    pval = c.metadata.get("page", "N/A")
+                    header = f"=== FRAGMENTO {i + 1} ===\nFUENTE: {src}\nPAGINA: {pval}\n"
+                    img_paths = c.metadata.get("image_paths")
+                    if img_paths:
+                        header += f"IMAGE_PATHS: {img_paths}\n"
+                    contexto_sintesis.append(header + "\n" + c.content)
 
             elif used_tool == "analizar_imagen":
                 if not payload.image_path:

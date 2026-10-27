@@ -118,42 +118,46 @@ class QdrantAdapter(IVectorRepository):
                 except Exception:
                     sparse_embeddings = []
             points = []
-            for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False)):
-                sparse_emb = sparse_embeddings[idx] if idx < len(sparse_embeddings) else None
-                vector_payload: dict[str, object] = {DENSE_VECTOR_NAME: vec.to_list()}
-                if sparse_emb is not None:
-                    try:
-                        sparse_dict = sparse_emb.as_dict()
-                        indices = sparse_dict.get("indices") or sparse_dict.get("id") or []
-                        values = sparse_dict.get("values") or sparse_dict.get("value") or []
-                        if indices and values:
-                            vector_payload[SPARSE_VECTOR_NAME] = SparseVector(
-                                indices=[int(i) for i in indices],
-                                values=[float(v) for v in values],
-                            )
-                    except Exception:
-                        pass
-                points.append(
-                    PointStruct(
-                        id=start + idx,
-                        vector=vector_payload,  # type: ignore[arg-type]
-                        payload={
-                            "chunk_id": str(chunk.chunk_id),
-                            "content": chunk.content,
-                            "is_visual": bool(chunk.is_visual),
-                            "page": int(chunk.page),
-                            "section": chunk.section,
-                            "document_id": str(chunk.document_id) if chunk.document_id else None,
-                            "source": chunk.metadata.get("source")
-                            or chunk.metadata.get("filename"),
-                            "filename": chunk.metadata.get("filename")
-                            or (
-                                str(chunk.metadata.get("source")).split("/")[-1]
-                                if chunk.metadata.get("source")
-                                else None
-                            ),
-                            **chunk.metadata,
-                        },
+        for idx, (chunk, vec) in enumerate(zip(batch_chunks, batch_vectors, strict=False)):
+            sparse_emb = sparse_embeddings[idx] if idx < len(sparse_embeddings) else None
+            vector_payload: dict[str, object] = {DENSE_VECTOR_NAME: vec.to_list()}
+            if sparse_emb is not None:
+                try:
+                    sparse_dict = sparse_emb.as_dict()
+                    indices = sparse_dict.get("indices") or sparse_dict.get("id") or []
+                    values = sparse_dict.get("values") or sparse_dict.get("value") or []
+                    if indices and values:
+                        vector_payload[SPARSE_VECTOR_NAME] = SparseVector(
+                            indices=[int(i) for i in indices],
+                            values=[float(v) for v in values],
+                        )
+                except Exception:
+                    pass
+            payload_dict = {
+                "chunk_id": str(chunk.chunk_id),
+                "content": chunk.content,
+                "is_visual": bool(chunk.is_visual),
+                "page": int(chunk.page),
+                "section": chunk.section,
+                "document_id": str(chunk.document_id) if chunk.document_id else None,
+                "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
+                "filename": chunk.metadata.get("filename")
+                or (
+                    str(chunk.metadata.get("source")).split("/")[-1]
+                    if chunk.metadata.get("source")
+                    else None
+                ),
+            }
+            for k, v in chunk.metadata.items():
+                if isinstance(v, str | int | float | bool) and k not in payload_dict:
+                    payload_dict[k] = v
+                elif k == "image_paths" and isinstance(v, str):
+                    payload_dict["image_paths"] = v
+            points.append(
+                PointStruct(
+                    id=start + idx,
+                    vector=vector_payload,  # type: ignore[arg-type]
+                    payload=payload_dict,
                     )
                 )
             try:

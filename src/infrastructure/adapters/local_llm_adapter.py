@@ -118,6 +118,16 @@ class LocalLLMAdapter(ILLMEngine):
             parametro=data.get("parametro"),
         )
 
+    def _encode_image_to_base64(self, image_path: str) -> str | None:
+        try:
+            if not os.path.exists(image_path):
+                return None
+            with open(image_path, "rb") as f:
+                data = f.read()
+            return base64.b64encode(data).decode("utf-8")
+        except Exception:
+            return None
+
     def generate_response(self, context: Sequence[str], user_input: str) -> str:
         if not self.check_health():
             raise LLMInferenceError("El motor LLM no esta disponible.")
@@ -132,11 +142,12 @@ class LocalLLMAdapter(ILLMEngine):
         system_prompt = (
             "Eres un asistente tecnico experto para manuales de impresoras Epson. "
             "Tu unica fuente de verdad es el Contexto tecnico que se te proporciona. "
+            "Usa tambien las imagenes/diagramas adjuntos cuando sean relevantes.\n"
             "Reglas estrictas:\n"
-            "- RESPONDE SIEMPRE con base en el contexto. Si hay informacion relevante, "
-            "aunque sea parcial, usala para elaborar una respuesta util y precisa.\n"
+            "- RESPONDE SIEMPRE con base en el contexto y en las imagenes adjuntas si existen. "
+            "Si hay informacion relevante, aunque sea parcial, usala.\n"
             "- NO digas 'No dispongo de informacion' si la respuesta se puede inferir "
-            "o encontrar parcialmente en los fragmentos recuperados.\n"
+            "o encontrar parcialmente en los fragmentos o imagenes.\n"
             "- Explica paso a paso, procedimientos, rutas de menu, nombres de programas "
             "(Epson Scan 2, Epson Email Print) o configuraciones cuando aparezcan.\n"
             "- Cita la fuente y la pagina al final de las afirmaciones clave usando "
@@ -147,17 +158,64 @@ class LocalLLMAdapter(ILLMEngine):
             "- Prioriza utilidad practica para el usuario sobre la cautela excesiva."
         )
 
-        user_msg = (
-            f"Contexto tecnico:\n{context_str}\n\n"
-            f"Pregunta del usuario:\n{user_input}\n\n"
-            "Instruccion: Usa UNICAMENTE el contexto anterior. Si existe informacion relacionada, "
-            "genera una respuesta completa y accionable con referencias [Archivo, Pag]."
-        )
+        image_paths: list[str] = []
+        for item in context:
+            if "IMAGE_PATHS:" in item:
+                try:
+                    part = item.split("IMAGE_PATHS:", 1)[1].strip()
+                    for p in part.split("|"):
+                        p = p.strip()
+                        if p and os.path.exists(p):
+                            image_paths.append(p)
+                except Exception:
+                    continue
+        image_paths = list(dict.fromkeys(image_paths))
+
+        user_content: list[dict[str, object]] | str
+        if image_paths:
+            content_list: list[dict[str, object]] = []
+            content_list.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Contexto tecnico:\n{context_str}\n\n"
+                        f"Pregunta del usuario:\n{user_input}\n\n"
+                        "Instruccion: Usa UNICAMENTE el contexto anterior y las imagenes adjuntas. "
+                        "Si existe informacion relacionada, genera una respuesta completa y "
+                        "accionable con referencias [Archivo, Pag]."
+                    ),
+                }
+            )
+            for img_path in image_paths[:4]:
+                b64 = self._encode_image_to_base64(img_path)
+                if not b64:
+                    continue
+                ext = os.path.splitext(img_path)[1].lower().lstrip(".") or "png"
+                if ext in ("jpg", "jpeg"):
+                    mime = "image/jpeg"
+                elif ext in ("png", "webp", "gif"):
+                    mime = f"image/{ext}"
+                else:
+                    mime = "image/png"
+                content_list.append(
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+                )
+            user_content = content_list
+        else:
+            user_msg = (
+                f"Contexto tecnico:\n{context_str}\n\n"
+                f"Pregunta del usuario:\n{user_input}\n\n"
+                "Instruccion: Usa UNICAMENTE el contexto anterior. "
+                "Si existe informacion relacionada, genera una respuesta completa y "
+                "accionable con referencias [Archivo, Pag]."
+            )
+            user_content = user_msg
+
         payload = {
             "model": self._model_chat,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
+                {"role": "user", "content": user_content},
             ],
             "temperature": 0.0,
             "max_tokens": 1024,

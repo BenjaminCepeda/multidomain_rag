@@ -64,11 +64,18 @@ class UserInterfaceApplication:
             )
             history.append({"role": "user", "content": text_content})
             history.append({"role": "assistant", "content": outbound_dto.response_text})
-            status_text = (
-                f"Herramienta: {outbound_dto.used_tool} | "
-                f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'} | "
-                f"Tiempo: {outbound_dto.elapsed_seconds:.2f}s"
-            )
+            if outbound_dto.timings is not None:
+                status_text = (
+                    f"Herramienta: {outbound_dto.used_tool} | "
+                    f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'} | "
+                    f"{outbound_dto.timings.format_summary()}"
+                )
+            else:
+                status_text = (
+                    f"Herramienta: {outbound_dto.used_tool} | "
+                    f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'} | "
+                    f"Tiempo: {outbound_dto.elapsed_seconds:.2f}s"
+                )
             if outbound_dto.is_degraded and outbound_dto.error_log:
                 status_text += f" | Error: {outbound_dto.error_log}"
         except DomainBaseError as e:

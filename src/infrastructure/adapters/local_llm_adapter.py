@@ -8,6 +8,8 @@ import time
 from collections.abc import Sequence
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from src.domain.exceptions.core_errors import DataIncompleteError, LLMInferenceError
 from src.domain.models.agent import OrchestratorDecision
@@ -37,6 +39,18 @@ class LocalLLMAdapter(ILLMEngine):
         self._model_vision = model_vision or "qwen3-14b"
         self._timeout = int(timeout) if timeout is not None else 60
         self._headers = {"Content-Type": "application/json"}
+        self._session = requests.Session()
+        retry = Retry(
+            total=0,
+            connect=0,
+            read=0,
+            redirect=0,
+            status=0,
+            backoff_factor=0,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
     def check_health(self) -> bool:
         try:
@@ -164,7 +178,7 @@ class LocalLLMAdapter(ILLMEngine):
 
         start_ts = time.perf_counter()
         try:
-            response = requests.post(
+            response = self._session.post(
                 url, json=payload, headers=self._headers, timeout=self._timeout
             )
             response.raise_for_status()
@@ -232,7 +246,7 @@ class LocalLLMAdapter(ILLMEngine):
             "temperature": 0.1,
         }
         try:
-            response = requests.post(
+            response = self._session.post(
                 url, json=payload, headers=self._headers, timeout=self._timeout
             )
             response.raise_for_status()

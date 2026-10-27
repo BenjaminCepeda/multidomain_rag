@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     ingestion_normal_page_limit: int = Field(default=50, ge=1)
     ingestion_batch_size_extended: int = Field(default=10, ge=1)
     ingestion_max_retries: int = Field(default=3, ge=0)
+    ingest_max_workers: int = Field(default=4, ge=1, le=32)
 
     # --- Speech-to-Text ---
     stt_model_size: str = Field(default="base")

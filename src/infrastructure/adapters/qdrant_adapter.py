@@ -169,6 +169,9 @@ class QdrantAdapter(IVectorRepository):
     def search(
         self, query_vector: EmbeddingVector, limit: int, min_score: float
     ) -> list[ManualChunk]:
+        import time
+
+        retrieval_start = time.perf_counter()
         self._ensure_collection()
         try:
             dense_results = self._client.search(
@@ -226,6 +229,8 @@ class QdrantAdapter(IVectorRepository):
                 payloads[key] = hit.payload or {}
 
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:limit]
+        retrieval_elapsed = time.perf_counter() - retrieval_start
+        logger.info("HYBRID_SEARCH_TIMING | retrieval_s=%.3f", retrieval_elapsed)
         valid_results: list[ManualChunk] = []
         from src.domain.models.ids import ChunkId
 

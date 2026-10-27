@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from src.domain.models.telemetry import PhaseTimings
+
 
 @dataclass(frozen=True)
 class InboundPayloadDTO:
@@ -20,3 +22,4 @@ class OutboundResponseDTO:
     used_tool: str
     error_log: str | None = None
     elapsed_seconds: float = 0.0
+    timings: PhaseTimings | None = None

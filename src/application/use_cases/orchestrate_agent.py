@@ -1,9 +1,11 @@
 # src/application/use_cases/orchestrate_agent.py
 import logging
+import time
 
 from src.application.dtos.agent_dtos import InboundPayloadDTO, OutboundResponseDTO
 from src.domain.exceptions.core_errors import DataIncompleteError, DomainBaseError
 from src.domain.models.document import ManualChunk
+from src.domain.models.telemetry import PhaseTimings
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.llm_engine import ILLMEngine
 from src.domain.ports.vector_repository import IVectorRepository
@@ -25,10 +27,11 @@ class OrchestrateAgentUseCase:
         self._embedding: IEmbeddingService = embedding
 
     def execute(self, payload: InboundPayloadDTO) -> OutboundResponseDTO:
-        import time
-
         has_image: bool = payload.image_path is not None
         start_time = time.perf_counter()
+
+        retrieval_seconds = 0.0
+        inference_seconds = 0.0
 
         try:
             decision = self._llm.get_orchestrator_decision(payload.user_input, has_image)
@@ -47,9 +50,11 @@ class OrchestrateAgentUseCase:
                 logger.info(f"Buscando en manuales con query: '{query_target}'")
 
                 query_vector = self._embedding.embed_text(query_target)
+                retrieval_start = time.perf_counter()
                 chunks: list[ManualChunk] = self._repo.search(
                     query_vector=query_vector, limit=3, min_score=0.20
                 )
+                retrieval_seconds = time.perf_counter() - retrieval_start
 
                 if not chunks:
                     logger.warning(f"No se encontraron resultados para: '{query_target}'")
@@ -70,13 +75,24 @@ class OrchestrateAgentUseCase:
             elif used_tool == "responder_directo":
                 contexto_sintesis = ["No se requieren herramientas externas."]
 
+            inference_start = time.perf_counter()
             respuesta_final = self._llm.generate_response(contexto_sintesis, payload.user_input)
+            inference_seconds = time.perf_counter() - inference_start
+
+            total_seconds = time.perf_counter() - start_time
+            timings = PhaseTimings(
+                retrieval_seconds=retrieval_seconds,
+                inference_seconds=inference_seconds,
+                total_seconds=total_seconds,
+            )
+            logger.info(f"PHASE_TIMINGS | {timings.format_summary()}")
 
             return OutboundResponseDTO(
                 response_text=respuesta_final,
                 is_degraded=False,
                 used_tool=used_tool,
-                elapsed_seconds=time.perf_counter() - start_time,
+                elapsed_seconds=total_seconds,
+                timings=timings,
             )
 
         except DomainBaseError as e:

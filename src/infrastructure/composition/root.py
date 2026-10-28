@@ -53,7 +53,7 @@ class CompositionRoot:
             vector_repo=vector_repo,
             embedding=embedding,
         )
-        manage_sources_uc = ManageSourcesUseCase(repository=vector_repo)
+        manage_sources_uc = ManageSourcesUseCase(repository=vector_repo, settings=self.settings)
 
         return ApplicationContext(
             settings=self.settings,

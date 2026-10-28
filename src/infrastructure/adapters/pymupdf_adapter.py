@@ -14,8 +14,6 @@ from src.infrastructure.config.settings import Settings
 class PyMuPDFAdapter(IDocumentExtractor):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._data_files_path = settings.data_files_path
-        self._extracted_images_path = settings.extracted_images_path
 
     def extract_chunks(self, file_path: str) -> list[ManualChunk]:
         if not os.path.exists(file_path):
@@ -27,7 +25,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
             file_name = os.path.basename(file_path)
             document_id = DocumentId.from_source(file_path)
             doc_hash = hashlib.md5(str(document_id).encode()).hexdigest()[:12]
-            images_dir = os.path.join(self._data_files_path, self._extracted_images_path)
+            images_dir = self._settings.extracted_images_dir
             os.makedirs(images_dir, exist_ok=True)
 
             for page_num in range(len(doc)):

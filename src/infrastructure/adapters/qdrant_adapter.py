@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 MICRO_BATCH_SIZE = 250
 
+QDRANT_DEFAULT_LOCAL_PATH = "./.qdrant_data"
+
 DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "sparse"
 
@@ -42,12 +44,15 @@ class QdrantAdapter(IVectorRepository):
         self._embedding: IEmbeddingService = embedding or SentenceTransformerEmbeddingAdapter(
             settings=settings
         )
-        self._qdrant_default_local_path = settings.qdrant_default_local_path
+        self._local_fallback_path = (
+            settings.qdrant_default_local_path.strip() or QDRANT_DEFAULT_LOCAL_PATH
+        )
         try:
             from fastembed import SparseTextEmbedding
 
             self._sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
-        except Exception:
+        except Exception as exc:
+            logger.warning("SparseEmbeddingUnavailable | falling back to dense-only: %s", exc)
             self._sparse_model = None
 
         location = settings.qdrant_url.strip()
@@ -62,10 +67,11 @@ class QdrantAdapter(IVectorRepository):
                 logger.warning(
                     f"No se pudo conectar a Qdrant remoto: {e}. Cambiando a almacenamiento local."
                 )
-                self._client = QdrantClient(path=self._qdrant_default_local_path)
+                self._client = QdrantClient(path=self._local_fallback_path)
         else:
-            logger.info(f"Usando Qdrant local en: {location}")
-            self._client = QdrantClient(path=location)
+            local_path = location or self._local_fallback_path
+            logger.info(f"Usando Qdrant local en: {local_path}")
+            self._client = QdrantClient(path=local_path)
 
     def has_data(self) -> bool:
         try:
@@ -130,8 +136,10 @@ class QdrantAdapter(IVectorRepository):
                                 indices=[int(i) for i in indices],
                                 values=[float(v) for v in values],
                             )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug(
+                            "SPARSE_VECTOR_SKIPPED | chunk_id=%s | error=%s", chunk.chunk_id, exc
+                        )
                 payload_dict = {
                     "chunk_id": str(chunk.chunk_id),
                     "content": chunk.content,

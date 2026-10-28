@@ -1,12 +1,15 @@
 # src/infrastructure/adapters/pymupdf_adapter.py
 import hashlib
 import os
+
 import fitz  # PyMuPDF
+
 from src.domain.exceptions.core_errors import DataIncompleteError
 from src.domain.models.document import ManualChunk
 from src.domain.models.ids import ChunkId, DocumentId
 from src.domain.ports.document_extractor import IDocumentExtractor
 from src.infrastructure.config.settings import Settings
+
 
 class PyMuPDFAdapter(IDocumentExtractor):
     def __init__(self, settings: Settings) -> None:

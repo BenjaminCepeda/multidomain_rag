@@ -13,7 +13,9 @@ from src.domain.exceptions.core_errors import DomainBaseError
 from src.infrastructure.composition.root import ApplicationContext, CompositionRoot
 from src.presentation.ui_state_presenter import UIStatePresenter
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", force=True)  # noqa: E501
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", force=True
+)
 
 
 class UserInterfaceApplication:
@@ -223,7 +225,9 @@ class UserInterfaceApplication:
                     label="Politica de ingesta",
                 )
                 ingest_btn = gr.Button("Ingestar documentos")
-                ingest_result = gr.Textbox(label="Resultado de ingesta", lines=10, interactive=False)  # noqa: E501
+                ingest_result = gr.Textbox(
+                    label="Resultado de ingesta", lines=10, interactive=False
+                )
 
                 gr.Markdown("### Fuentes indexadas en Qdrant")
                 sources_dropdown = gr.Dropdown(
@@ -264,11 +268,15 @@ class UserInterfaceApplication:
                         )
                         btn_remove = gr.Button("X", size="sm", elem_classes="minimal-btn")
 
-                    audio_input = gr.Audio(sources=["microphone"], type="filepath", visible=False, elem_id="hidden-mic")  # noqa: E501
+                    audio_input = gr.Audio(
+                        sources=["microphone"], type="filepath", visible=False, elem_id="hidden-mic"
+                    )
 
                     with gr.Row(elem_classes="input-row"):
                         btn_plus = gr.Button("+", elem_classes="minimal-btn")
-                        txt_input = gr.Textbox(placeholder="Escribe tu consulta...", show_label=False, scale=5)  # noqa: E501
+                        txt_input = gr.Textbox(
+                            placeholder="Escribe tu consulta...", show_label=False, scale=5
+                        )
                         btn_mic = gr.Button("Mic", elem_classes="minimal-btn")
                         btn_send = gr.Button("Send", elem_classes="minimal-btn")
 
@@ -284,7 +292,9 @@ class UserInterfaceApplication:
                 def toggle_menu(is_visible: bool) -> tuple[bool, Any]:
                     return not is_visible, gr.update(visible=not is_visible)
 
-                btn_plus.click(toggle_menu, inputs=[menu_visible], outputs=[menu_visible, action_menu])  # noqa: E501
+                btn_plus.click(
+                    toggle_menu, inputs=[menu_visible], outputs=[menu_visible, action_menu]
+                )
 
                 toggle_mic_js = """
                 () => {

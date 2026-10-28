@@ -23,7 +23,9 @@ def main() -> None:
         ctx = CompositionRoot().build()
         app = UserInterfaceApplication(ctx)
         interface = app.build_interface()
-        logger.info(f"Sistema listo. Interfaz disponible en http://{ctx.settings.gradio_host}:{ctx.settings.gradio_port}")
+        logger.info(
+            f"Sistema listo. Interfaz disponible en http://{ctx.settings.gradio_host}:{ctx.settings.gradio_port}"
+        )
         interface.launch(
             server_name=ctx.settings.gradio_host,
             server_port=ctx.settings.gradio_port,

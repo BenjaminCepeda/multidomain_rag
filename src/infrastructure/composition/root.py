@@ -36,7 +36,7 @@ class CompositionRoot:
         embedding: IEmbeddingService = SentenceTransformerEmbeddingAdapter(settings=self.settings)
         vector_repo = QdrantAdapter(settings=self.settings, embedding=embedding)
         llm = LocalLLMAdapter(settings=self.settings)
-        extractor = PyMuPDFAdapter()
+        extractor = PyMuPDFAdapter(settings=self.settings)
         stt = STTAdapter(
             model_size=self.settings.stt_model_size,
             device=self.settings.stt_device,

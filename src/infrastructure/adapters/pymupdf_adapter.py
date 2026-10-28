@@ -1,16 +1,19 @@
 # src/infrastructure/adapters/pymupdf_adapter.py
 import hashlib
 import os
-
 import fitz  # PyMuPDF
-
 from src.domain.exceptions.core_errors import DataIncompleteError
 from src.domain.models.document import ManualChunk
 from src.domain.models.ids import ChunkId, DocumentId
 from src.domain.ports.document_extractor import IDocumentExtractor
-
+from src.infrastructure.config.settings import Settings
 
 class PyMuPDFAdapter(IDocumentExtractor):
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._data_files_path = settings.data_files_path
+        self._extracted_images_path = settings.extracted_images_path
+
     def extract_chunks(self, file_path: str) -> list[ManualChunk]:
         if not os.path.exists(file_path):
             raise DataIncompleteError(f"El extractor fisico no encontro el archivo en: {file_path}")
@@ -21,7 +24,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
             file_name = os.path.basename(file_path)
             document_id = DocumentId.from_source(file_path)
             doc_hash = hashlib.md5(str(document_id).encode()).hexdigest()[:12]
-            images_dir = os.path.join("data", "extracted_images")
+            images_dir = os.path.join(self._data_files_path, self._extracted_images_path)
             os.makedirs(images_dir, exist_ok=True)
 
             for page_num in range(len(doc)):

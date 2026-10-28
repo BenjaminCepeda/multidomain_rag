@@ -42,6 +42,7 @@ class QdrantAdapter(IVectorRepository):
         self._embedding: IEmbeddingService = embedding or SentenceTransformerEmbeddingAdapter(
             settings=settings
         )
+        self._qdrant_default_local_path = settings.qdrant_default_local_path
         try:
             from fastembed import SparseTextEmbedding
 
@@ -61,7 +62,7 @@ class QdrantAdapter(IVectorRepository):
                 logger.warning(
                     f"No se pudo conectar a Qdrant remoto: {e}. Cambiando a almacenamiento local."
                 )
-                self._client = QdrantClient(path="./qdrant_local_data")
+                self._client = QdrantClient(path=self._qdrant_default_local_path)
         else:
             logger.info(f"Usando Qdrant local en: {location}")
             self._client = QdrantClient(path=location)

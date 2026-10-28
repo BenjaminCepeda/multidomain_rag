@@ -115,10 +115,7 @@ class IngestManualUseCase:
             "INGEST_CONFIG | max_workers=%d (source=settings.ingest_max_workers)", max_workers
         )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self._process_file, p): p
-                for p in valid_paths
-            }
+            futures = {executor.submit(self._process_file, p): p for p in valid_paths}
             for fut in as_completed(futures):
                 path_str = futures[fut]
                 try:

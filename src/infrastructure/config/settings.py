@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # --- Vector store (Qdrant) ---
     qdrant_url: str = Field(default="http://localhost:6333")
-    qdrant_default_local_path: str= Field(default="./.qdrant_data")
+    qdrant_default_local_path: str = Field(default="./.qdrant_data")
     qdrant_collection_name: str = Field(default="technical_docs")
     qdrant_timeout_seconds: float = Field(default=2.0, ge=0.1)
 

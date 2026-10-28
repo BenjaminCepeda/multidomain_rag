@@ -99,9 +99,7 @@ class QdrantAdapter(IVectorRepository):
         self._vector_dim = vector_dim
         self._ensure_collection()
 
-    def upsert(
-        self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]
-    ) -> None:
+    def upsert(self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]) -> None:
         self._ensure_collection()
         if len(chunks) != len(vectors):
             raise VectorStorageError("chunks and vectors length mismatch.")
@@ -159,7 +157,8 @@ class QdrantAdapter(IVectorRepository):
                 from src.domain.models.ids import ChunkId, DocumentId
 
                 doc_id_for_hash = (
-                    chunk.document_id if chunk.document_id is not None
+                    chunk.document_id
+                    if chunk.document_id is not None
                     else DocumentId.from_source(str(uuid.uuid4()))
                 )
                 img_paths_hash = payload_dict.get("image_paths")

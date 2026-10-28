@@ -414,6 +414,7 @@ Rules:
 from dataclasses import dataclass
 from uuid import UUID
 
+
 @dataclass(frozen=True)
 class DocumentId:
     value: UUID
@@ -423,9 +424,11 @@ class DocumentId:
         # deterministic UUID5 based on normalized path
         ...
 
+
 @dataclass(frozen=True)
 class ChunkId:
     value: str  # "<doc_uuid>:<section>:<index>"
+
 
 @dataclass(frozen=True)
 class EmbeddingVector:
@@ -441,6 +444,7 @@ class EmbeddingVector:
 from dataclasses import dataclass, field
 from typing import Mapping
 from .ids import ChunkId, DocumentId
+
 
 @dataclass(frozen=True)
 class ManualChunk:
@@ -460,11 +464,13 @@ class ManualChunk:
 from dataclasses import dataclass
 from pathlib import Path
 
+
 @dataclass(frozen=True)
 class IngestionRequestDTO:
     file_paths: tuple[Path, ...]
     force_reindex: bool = False
     policy_override: str | None = None  # "normal" | "extended" | None (auto)
+
 
 @dataclass(frozen=True)
 class IngestionResultDTO:
@@ -479,12 +485,14 @@ class IngestionResultDTO:
 # src/application/dtos/search_dtos.py
 from dataclasses import dataclass
 
+
 @dataclass(frozen=True)
 class SearchQueryDTO:
     text: str
     limit: int = 5
     min_score: float = 0.20
     source_filter: str | None = None
+
 
 @dataclass(frozen=True)
 class SearchResultDTO:
@@ -504,6 +512,7 @@ class SearchResultDTO:
 from abc import ABC, abstractmethod
 from typing import Sequence
 from src.domain.models.embedding import EmbeddingVector
+
 
 class IEmbeddingService(ABC):
     @abstractmethod
@@ -531,9 +540,12 @@ from abc import ABC, abstractmethod
 from typing import Sequence
 from src.domain.models.agent import OrchestratorDecision
 
+
 class ILLMEngine(ABC):
     @abstractmethod
-    def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision: ...
+    def get_orchestrator_decision(
+        self, user_input: str, has_image: bool
+    ) -> OrchestratorDecision: ...
 
     @abstractmethod
     def generate_response(self, context: Sequence[str], user_input: str) -> str: ...
@@ -556,6 +568,7 @@ from typing import Sequence
 from src.domain.models.document import ManualChunk
 from src.domain.models.embedding import EmbeddingVector
 
+
 class IVectorRepository(ABC):
     @abstractmethod
     def ensure_collection(self, vector_dim: int) -> None: ...
@@ -564,7 +577,9 @@ class IVectorRepository(ABC):
     def upsert(self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]) -> None: ...
 
     @abstractmethod
-    def search(self, query_vector: EmbeddingVector, limit: int, min_score: float) -> list[ManualChunk]: ...
+    def search(
+        self, query_vector: EmbeddingVector, limit: int, min_score: float
+    ) -> list[ManualChunk]: ...
 
     @abstractmethod
     def count(self) -> int: ...
@@ -583,20 +598,22 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from src.domain.models.document import Document
 
+
 class IDocumentExtractor(ABC):
     @abstractmethod
     def extract(self, path: Path) -> Document:
         """Extract raw text + structure. Raises DataIncompleteError."""
         ...
 
+
 # src/domain/ports/chunker.py
 from abc import ABC, abstractmethod
 from src.domain.models.document import Document, ManualChunk
 
+
 class IChunker(ABC):
     @abstractmethod
-    def chunk(self, document: Document, policy: "IIngestionPolicy") -> list[ManualChunk]:
-        ...
+    def chunk(self, document: Document, policy: "IIngestionPolicy") -> list[ManualChunk]: ...
 ```
 
 #### 4.3.5 Ingestion Policy
@@ -606,6 +623,7 @@ class IChunker(ABC):
 from abc import ABC, abstractmethod
 from typing import Sequence
 from src.domain.models.document import ManualChunk
+
 
 class IIngestionPolicy(ABC):
     @property
@@ -709,8 +727,10 @@ A `IngestionPolicySelector` (domain service) chooses the policy based on `page_c
 ```python
 class IngestionPolicySelector:
     def select(self, page_count: int, override: str | None = None) -> IIngestionPolicy:
-        if override == "normal": return NormalIngestionPolicy()
-        if override == "extended": return ExtendedIngestionPolicy()
+        if override == "normal":
+            return NormalIngestionPolicy()
+        if override == "extended":
+            return ExtendedIngestionPolicy()
         return self._by_page_count(page_count)
 ```
 
@@ -742,8 +762,9 @@ class IngestManualUseCase:
         checkpoint_store: ICheckpointStore,
     ) -> None: ...
 
-    def execute(self, request: IngestionRequestDTO, progress_callback=None) -> IngestionResultDTO:
-        ...
+    def execute(
+        self, request: IngestionRequestDTO, progress_callback=None
+    ) -> IngestionResultDTO: ...
 ```
 
 ---
@@ -758,6 +779,7 @@ Target file: `src/infrastructure/config/settings.py`
 # src/infrastructure/config/settings.py
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -820,6 +842,7 @@ from src.infrastructure.adapters.stt_adapter import STTAdapter
 from src.application.use_cases.ingest_manual import IngestManualUseCase
 from src.application.use_cases.orchestrate_agent import OrchestrateAgentUseCase
 
+
 class CompositionRoot:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
@@ -874,6 +897,7 @@ class CompositionRoot:
 # main.py (target)
 from src.infrastructure.composition.root import CompositionRoot
 from src.presentation.web_app import UserInterfaceApplication
+
 
 def main() -> None:
     ctx = CompositionRoot().build()

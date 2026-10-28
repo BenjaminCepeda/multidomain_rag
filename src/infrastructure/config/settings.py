@@ -23,8 +23,15 @@ class Settings(BaseSettings):
     llm_model_vision: str = Field(default="qwen3-14b")
     llm_timeout_seconds: int = Field(default=180, ge=1)
 
+    # --- FILES PRECESSED PATHS ---
+    data_files_path: str = Field(default="./data")
+    extracted_images_path: str = Field(default="extracted_images")
+    processed_files_path: str = Field(default="processed_files")
+    raw_files_path: str = Field(default="raw")
+
     # --- Vector store (Qdrant) ---
     qdrant_url: str = Field(default="http://localhost:6333")
+    qdrant_default_local_path: str= Field(default="./.qdrant_data")
     qdrant_collection_name: str = Field(default="technical_docs")
     qdrant_timeout_seconds: float = Field(default=2.0, ge=0.1)
 

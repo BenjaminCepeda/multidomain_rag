@@ -1,4 +1,6 @@
 # src/infrastructure/config/settings.py
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,6 +30,21 @@ class Settings(BaseSettings):
     extracted_images_path: str = Field(default="extracted_images")
     processed_files_path: str = Field(default="processed_files")
     raw_files_path: str = Field(default="raw")
+
+    @property
+    def data_root(self) -> Path:
+        """Root directory for every local artifact (originals and derived assets)."""
+        return Path(self.data_files_path)
+
+    @property
+    def raw_files_dir(self) -> Path:
+        """Directory holding the original source documents."""
+        return self.data_root / self.raw_files_path
+
+    @property
+    def extracted_images_dir(self) -> Path:
+        """Directory holding visual assets extracted from the source documents."""
+        return self.data_root / self.extracted_images_path
 
     # --- Vector store (Qdrant) ---
     qdrant_url: str = Field(default="http://localhost:6333")

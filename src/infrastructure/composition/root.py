@@ -52,6 +52,7 @@ class CompositionRoot:
             llm_engine=llm,
             vector_repo=vector_repo,
             embedding=embedding,
+            settings=self.settings,
         )
         manage_sources_uc = ManageSourcesUseCase(repository=vector_repo, settings=self.settings)
 

@@ -105,6 +105,29 @@ class QdrantAdapter(IVectorRepository):
         self._vector_dim = vector_dim
         self._ensure_collection()
 
+    @staticmethod
+    def _build_payload(chunk: ManualChunk) -> dict[str, object]:
+        """Build the Qdrant payload, preserving enriched visual context fields."""
+        payload: dict[str, object] = {
+            "chunk_id": str(chunk.chunk_id),
+            "content": chunk.content,
+            "is_visual": bool(chunk.is_visual),
+            "page": int(chunk.page),
+            "section": chunk.section,
+            "document_id": str(chunk.document_id) if chunk.document_id else None,
+            "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
+            "filename": chunk.metadata.get("filename")
+            or (
+                str(chunk.metadata.get("source")).split("/")[-1]
+                if chunk.metadata.get("source")
+                else None
+            ),
+        }
+        for key, value in chunk.metadata.items():
+            if isinstance(value, str | int | float | bool) and key not in payload:
+                payload[key] = value
+        return payload
+
     def upsert(self, chunks: Sequence[ManualChunk], vectors: Sequence[EmbeddingVector]) -> None:
         self._ensure_collection()
         if len(chunks) != len(vectors):
@@ -140,26 +163,7 @@ class QdrantAdapter(IVectorRepository):
                         logger.debug(
                             "SPARSE_VECTOR_SKIPPED | chunk_id=%s | error=%s", chunk.chunk_id, exc
                         )
-                payload_dict = {
-                    "chunk_id": str(chunk.chunk_id),
-                    "content": chunk.content,
-                    "is_visual": bool(chunk.is_visual),
-                    "page": int(chunk.page),
-                    "section": chunk.section,
-                    "document_id": str(chunk.document_id) if chunk.document_id else None,
-                    "source": chunk.metadata.get("source") or chunk.metadata.get("filename"),
-                    "filename": chunk.metadata.get("filename")
-                    or (
-                        str(chunk.metadata.get("source")).split("/")[-1]
-                        if chunk.metadata.get("source")
-                        else None
-                    ),
-                }
-                for k, v in chunk.metadata.items():
-                    if isinstance(v, str | int | float | bool) and k not in payload_dict:
-                        payload_dict[k] = v
-                    elif k == "image_paths" and isinstance(v, str):
-                        payload_dict["image_paths"] = v
+                payload_dict = self._build_payload(chunk)
                 import uuid
 
                 from src.domain.models.ids import ChunkId, DocumentId

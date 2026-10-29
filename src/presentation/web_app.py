@@ -66,6 +66,16 @@ class UserInterfaceApplication:
             )
             history.append({"role": "user", "content": text_content})
             history.append({"role": "assistant", "content": outbound_dto.response_text})
+            for evidence in outbound_dto.visual_evidence:
+                history.append(
+                    {
+                        "role": "assistant",
+                        "content": {
+                            "path": evidence.image_path,
+                            "alt_text": evidence.caption,
+                        },
+                    }
+                )
             if outbound_dto.timings is not None:
                 status_text = (
                     f"Herramienta: {outbound_dto.used_tool} | "
@@ -78,6 +88,8 @@ class UserInterfaceApplication:
                     f"Degradado: {'Si' if outbound_dto.is_degraded else 'No'} | "
                     f"Tiempo: {outbound_dto.elapsed_seconds:.2f}s"
                 )
+            if outbound_dto.visual_evidence:
+                status_text += f" | Imagenes: {len(outbound_dto.visual_evidence)}"
             if outbound_dto.is_degraded and outbound_dto.error_log:
                 status_text += f" | Error: {outbound_dto.error_log}"
         except DomainBaseError as e:
@@ -92,6 +104,11 @@ class UserInterfaceApplication:
 
     def refresh_status(self) -> str:
         return self._presenter.build_status()
+
+    @property
+    def allowed_paths(self) -> list[str]:
+        """Local directories Gradio may serve (extracted visual assets live here)."""
+        return [str(self._ctx.settings.data_root.resolve())]
 
     def refresh_sources(self) -> Any:
         try:
@@ -407,4 +424,10 @@ class UserInterfaceApplication:
 
 
 if __name__ == "__main__":
-    UserInterfaceApplication().build_interface().launch(server_name="127.0.0.1", server_port=7860)
+    app = UserInterfaceApplication()
+    interface = app.build_interface()
+    interface.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        allowed_paths=app.allowed_paths,
+    )

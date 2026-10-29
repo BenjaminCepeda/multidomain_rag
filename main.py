@@ -30,6 +30,7 @@ def main() -> None:
             server_name=ctx.settings.gradio_host,
             server_port=ctx.settings.gradio_port,
             share=False,
+            allowed_paths=app.allowed_paths,
         )
     except Exception as e:
         logger.critical(f"Fallo critico en el arranque del sistema: {e}")

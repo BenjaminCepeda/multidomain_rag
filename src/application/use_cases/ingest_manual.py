@@ -40,11 +40,13 @@ class IngestManualUseCase:
             chunks = self._extractor.extract_chunks(path_str)
             for c in chunks:
                 try:
+                    if not c.is_visual:
+                        continue
                     img_paths = c.metadata.get("image_paths")
                     if img_paths and isinstance(img_paths, str):
                         images_count += len([p for p in img_paths.split("|") if p])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("IMG_COUNT | action=skipped | error=%s", exc)
             return path_str, chunks, len(chunks), images_count
         except Exception as e:
             logger.error(f"Error critico procesando {path_str}: {e!s}")

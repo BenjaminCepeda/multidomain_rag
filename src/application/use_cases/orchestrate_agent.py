@@ -1,16 +1,26 @@
 # src/application/use_cases/orchestrate_agent.py
 import logging
 import time
+from collections.abc import Sequence
+from pathlib import Path
 
-from src.application.dtos.agent_dtos import InboundPayloadDTO, OutboundResponseDTO
+from src.application.dtos.agent_dtos import (
+    InboundPayloadDTO,
+    OutboundResponseDTO,
+    VisualEvidenceDTO,
+)
 from src.domain.exceptions.core_errors import DataIncompleteError, DomainBaseError
 from src.domain.models.document import ManualChunk
 from src.domain.models.telemetry import PhaseTimings
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.llm_engine import ILLMEngine
 from src.domain.ports.vector_repository import IVectorRepository
+from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+MAX_VISUAL_EVIDENCE = 4
+ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
 
 class OrchestrateAgentUseCase:
@@ -21,10 +31,12 @@ class OrchestrateAgentUseCase:
         llm_engine: ILLMEngine,
         vector_repo: IVectorRepository,
         embedding: IEmbeddingService,
+        settings: Settings,
     ) -> None:
         self._llm: ILLMEngine = llm_engine
         self._repo: IVectorRepository = vector_repo
         self._embedding: IEmbeddingService = embedding
+        self._settings = settings
 
     def execute(self, payload: InboundPayloadDTO) -> OutboundResponseDTO:
         has_image: bool = payload.image_path is not None
@@ -32,6 +44,7 @@ class OrchestrateAgentUseCase:
 
         retrieval_seconds = 0.0
         inference_seconds = 0.0
+        visual_evidence: tuple[VisualEvidenceDTO, ...] = ()
 
         try:
             decision = self._llm.get_orchestrator_decision(payload.user_input, has_image)
@@ -47,7 +60,7 @@ class OrchestrateAgentUseCase:
 
             if used_tool == "buscar_manual":
                 query_target = payload.user_input
-                logger.info(f"Buscando en manuales con query: '{query_target}'")
+                logger.info("MANUAL_SEARCH | query_chars=%d", len(query_target))
 
                 query_vector = self._embedding.embed_text(query_target)
                 retrieval_start = time.perf_counter()
@@ -57,15 +70,24 @@ class OrchestrateAgentUseCase:
                 retrieval_seconds = time.perf_counter() - retrieval_start
 
                 if not chunks:
-                    logger.warning(f"No se encontraron resultados para: '{query_target}'")
+                    logger.warning(
+                        "MANUAL_SEARCH | action=no_results | query_chars=%d", len(query_target)
+                    )
                 else:
                     logger.info(f"Recuperados {len(chunks)} fragmentos.")
+                    visual_evidence = self._collect_visual_evidence(chunks)
 
                 contexto_sintesis = []
                 for i, c in enumerate(chunks):
                     src = c.metadata.get("source") or c.metadata.get("filename") or "Desconocido"
                     pval = c.metadata.get("page", "N/A")
                     header = f"=== FRAGMENTO {i + 1} ===\nFUENTE: {src}\nPAGINA: {pval}\n"
+                    document_title = c.metadata.get("document_title")
+                    image_title = c.metadata.get("image_title")
+                    if document_title:
+                        header += f"DOCUMENTO: {document_title}\n"
+                    if image_title:
+                        header += f"IMAGEN: {image_title}\n"
                     img_paths = c.metadata.get("image_paths")
                     if img_paths:
                         header += f"IMAGE_PATHS: {img_paths}\n"
@@ -98,6 +120,7 @@ class OrchestrateAgentUseCase:
                 used_tool=used_tool,
                 elapsed_seconds=total_seconds,
                 timings=timings,
+                visual_evidence=visual_evidence,
             )
 
         except DomainBaseError as e:
@@ -110,6 +133,63 @@ class OrchestrateAgentUseCase:
             return self._handle_graceful_degradation(
                 payload.user_input, "orquestador", str(e), time.perf_counter() - start_time
             )
+
+    def _collect_visual_evidence(
+        self, chunks: Sequence[ManualChunk]
+    ) -> tuple[VisualEvidenceDTO, ...]:
+        """Resolve indexed visual assets to renderable, in-scope local paths."""
+        assets_dir = self._settings.extracted_images_dir.resolve()
+        evidence: list[VisualEvidenceDTO] = []
+        seen: set[str] = set()
+
+        for chunk in chunks:
+            if not chunk.is_visual:
+                continue
+            raw_path = chunk.metadata.get("image_path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+
+            resolved = self._resolve_asset_path(raw_path, assets_dir)
+            if resolved is None:
+                logger.warning(
+                    "VISUAL_EVIDENCE | chunk_id=%s | action=skipped | reason=unresolved_path",
+                    chunk.chunk_id,
+                )
+                continue
+
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            evidence.append(
+                VisualEvidenceDTO(
+                    image_path=key,
+                    image_title=str(chunk.metadata.get("image_title") or ""),
+                    document_title=str(
+                        chunk.metadata.get("document_title") or chunk.metadata.get("source") or ""
+                    ),
+                    page=chunk.page,
+                )
+            )
+            if len(evidence) >= MAX_VISUAL_EVIDENCE:
+                break
+
+        return tuple(evidence)
+
+    @staticmethod
+    def _resolve_asset_path(raw_path: str, assets_dir: Path) -> Path | None:
+        candidate = Path(raw_path)
+        for path in (candidate, assets_dir / candidate.name):
+            if path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES:
+                continue
+            try:
+                resolved = path.resolve()
+            except OSError as exc:
+                logger.warning("VISUAL_EVIDENCE | path=%s | action=skipped | error=%s", path, exc)
+                continue
+            if resolved.is_file() and resolved.is_relative_to(assets_dir):
+                return resolved
+        return None
 
     def _handle_graceful_degradation(
         self, query: str, herramienta: str, motivo_error: str, elapsed_seconds: float = 0.0

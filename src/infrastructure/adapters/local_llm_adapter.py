@@ -18,6 +18,32 @@ from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
+MAX_IMAGES_PER_REQUEST = 4
+MULTIMODAL_REJECTED_STATUSES = frozenset({400, 422})
+_IMAGE_MIME_TYPES = {
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "gif": "image/gif",
+}
+
+
+def _image_mime_type(image_path: str) -> str:
+    extension = os.path.splitext(image_path)[1].lower().lstrip(".")
+    return _IMAGE_MIME_TYPES.get(extension, "image/png")
+
+
+def _build_user_text(context_str: str, user_input: str, include_images: bool) -> str:
+    attachment_note = " y las imagenes adjuntas" if include_images else ""
+    return (
+        f"Contexto tecnico:\n{context_str}\n\n"
+        f"Pregunta del usuario:\n{user_input}\n\n"
+        f"Instruccion: Usa UNICAMENTE el contexto anterior{attachment_note}. "
+        "Si existe informacion relacionada, genera una respuesta completa y "
+        "accionable con referencias [Archivo, Pag]."
+    )
+
 
 class LocalLLMAdapter(ILLMEngine):
     def __init__(
@@ -130,12 +156,36 @@ class LocalLLMAdapter(ILLMEngine):
     def _encode_image_to_base64(self, image_path: str) -> str | None:
         try:
             if not os.path.exists(image_path):
+                logger.warning(
+                    "LLM_TRACE image skipped | reason=missing_file | path=%s", image_path
+                )
                 return None
             with open(image_path, "rb") as f:
                 data = f.read()
             return base64.b64encode(data).decode("utf-8")
-        except Exception:
+        except OSError as exc:
+            logger.warning("LLM_TRACE image skipped | reason=unreadable | error=%s", exc)
             return None
+
+    @staticmethod
+    def _collect_image_paths(context: Sequence[str]) -> list[str]:
+        """Extract existing image paths from context headers, preserving order.
+
+        Only the header line is parsed, so the fragment body that follows
+        ``IMAGE_PATHS:`` is never mistaken for an asset path.
+        """
+        image_paths: list[str] = []
+        for item in context:
+            marker = "IMAGE_PATHS:"
+            if marker not in item:
+                continue
+            remainder = item.split(marker, 1)[1].lstrip()
+            header = remainder.splitlines()[0] if remainder else ""
+            for raw_path in header.split("|"):
+                path = raw_path.strip()
+                if path and os.path.exists(path):
+                    image_paths.append(path)
+        return list(dict.fromkeys(image_paths))
 
     def generate_response(self, context: Sequence[str], user_input: str) -> str:
         if not self.check_health():
@@ -167,88 +217,79 @@ class LocalLLMAdapter(ILLMEngine):
             "- Prioriza utilidad practica para el usuario sobre la cautela excesiva."
         )
 
-        image_paths: list[str] = []
-        for item in context:
-            if "IMAGE_PATHS:" in item:
-                try:
-                    part = item.split("IMAGE_PATHS:", 1)[1].strip()
-                    for p in part.split("|"):
-                        p = p.strip()
-                        if p and os.path.exists(p):
-                            image_paths.append(p)
-                except Exception:
-                    continue
-        image_paths = list(dict.fromkeys(image_paths))
+        image_paths = self._collect_image_paths(context)
+        text_block = _build_user_text(context_str, user_input, include_images=bool(image_paths))
 
+        attached_images = 0
         user_content: list[dict[str, object]] | str
         if image_paths:
-            content_list: list[dict[str, object]] = []
-            content_list.append(
-                {
-                    "type": "text",
-                    "text": (
-                        f"Contexto tecnico:\n{context_str}\n\n"
-                        f"Pregunta del usuario:\n{user_input}\n\n"
-                        "Instruccion: Usa UNICAMENTE el contexto anterior y las imagenes adjuntas. "
-                        "Si existe informacion relacionada, genera una respuesta completa y "
-                        "accionable con referencias [Archivo, Pag]."
-                    ),
-                }
-            )
-            for img_path in image_paths[:4]:
+            content_list: list[dict[str, object]] = [{"type": "text", "text": text_block}]
+            for img_path in image_paths[:MAX_IMAGES_PER_REQUEST]:
                 b64 = self._encode_image_to_base64(img_path)
                 if not b64:
                     continue
-                ext = os.path.splitext(img_path)[1].lower().lstrip(".") or "png"
-                if ext in ("jpg", "jpeg"):
-                    mime = "image/jpeg"
-                elif ext in ("png", "webp", "gif"):
-                    mime = f"image/{ext}"
-                else:
-                    mime = "image/png"
+                mime = _image_mime_type(img_path)
                 content_list.append(
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
                 )
-            user_content = content_list
+                attached_images += 1
+            user_content = content_list if attached_images else text_block
         else:
-            user_msg = (
-                f"Contexto tecnico:\n{context_str}\n\n"
-                f"Pregunta del usuario:\n{user_input}\n\n"
-                "Instruccion: Usa UNICAMENTE el contexto anterior. "
-                "Si existe informacion relacionada, genera una respuesta completa y "
-                "accionable con referencias [Archivo, Pag]."
-            )
-            user_content = user_msg
+            user_content = text_block
 
-        payload = {
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        payload: dict[str, object] = {
             "model": self._model_chat,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
+            "messages": messages,
             "temperature": 0.0,
             "max_tokens": 1024,
         }
 
         logger.info(
             "LLM_TRACE generate_response | fragments=%d | context_chars=%d | user_msg_chars=%d "
-            "| timeout_s=%d | endpoint=%s | model=%s",
+            "| images_attached=%d | timeout_s=%d | endpoint=%s | model=%s",
             len(context),
             len(context_str),
-            len(user_msg),
+            len(text_block),
+            attached_images,
             self._timeout,
             self._endpoint,
             self._model_chat,
         )
-        logger.debug("LLM_TRACE SYSTEM_PROMPT >>>\n%s\n<<< END SYSTEM_PROMPT", system_prompt)
-        logger.debug("LLM_TRACE USER_MSG >>>\n%s\n<<< END USER_MSG", user_msg)
+        logger.debug(
+            "LLM_TRACE request | system_prompt_chars=%d | user_msg_chars=%d | multimodal=%s",
+            len(system_prompt),
+            len(text_block),
+            bool(attached_images),
+        )
 
         start_ts = time.perf_counter()
         try:
-            response = self._session.post(
-                url, json=payload, headers=self._headers, timeout=self._timeout
+            response = self._post_completion(url, payload)
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if not attached_images or status not in MULTIMODAL_REJECTED_STATUSES:
+                elapsed = time.perf_counter() - start_ts
+                logger.error("LLM_TRACE REQUEST_ERROR after %.3fs | status=%s", elapsed, status)
+                raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
+
+            logger.warning(
+                "LLM_TRACE multimodal rejected | status=%d | action=retry_text_only",
+                status,
             )
-            response.raise_for_status()
+            attached_images = 0
+            text_block = _build_user_text(context_str, user_input, include_images=False)
+            messages[1]["content"] = text_block
+            start_ts = time.perf_counter()
+            try:
+                response = self._post_completion(url, payload)
+            except requests.exceptions.RequestException as fallback_exc:
+                raise LLMInferenceError(
+                    "Error de comunicacion con el LLM local.", fallback_exc
+                ) from fallback_exc
         except requests.exceptions.Timeout as exc:
             elapsed = time.perf_counter() - start_ts
             logger.error(
@@ -278,13 +319,25 @@ class LocalLLMAdapter(ILLMEngine):
         elapsed = time.perf_counter() - start_ts
         logger.info(
             "LLM_TRACE RESPONSE_OK | latency_s=%.3f | latency_ms=%.0f | fragments=%d "
-            "| context_chars=%d",
+            "| context_chars=%d | images_attached=%d",
             elapsed,
             elapsed * 1000,
             len(context),
             len(context_str),
+            attached_images,
         )
-        return str(response.json()["choices"][0]["message"]["content"]).strip()
+        try:
+            return str(response.json()["choices"][0]["message"]["content"]).strip()
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise LLMInferenceError("El LLM local devolvio una respuesta malformada.", exc) from exc
+
+    def _post_completion(self, url: str, payload: dict[str, object]) -> requests.Response:
+        """POST a chat completion, surfacing transport errors to the caller."""
+        response = self._session.post(
+            url, json=payload, headers=self._headers, timeout=self._timeout
+        )
+        response.raise_for_status()
+        return response
 
     def analyze_image(self, image_path: str) -> str:
         if not self.check_health():

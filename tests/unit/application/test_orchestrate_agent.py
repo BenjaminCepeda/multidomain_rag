@@ -95,6 +95,20 @@ def _visual_chunk(image_path: str, title: str = "Diagrama de flujo") -> ManualCh
     )
 
 
+def _text_chunk(image_paths: str, page: int = 2) -> ManualChunk:
+    return ManualChunk(
+        chunk_id=ChunkId("text-1"),
+        content="The basic training and inference process of a DL model",
+        page=page,
+        metadata={
+            "document_title": "TinyML en el borde",
+            "document_name": "tinyml.pdf",
+            "page_number": page,
+            "image_paths": image_paths,
+        },
+    )
+
+
 def _use_case(settings: Settings, chunks: list[ManualChunk]) -> OrchestrateAgentUseCase:
     return OrchestrateAgentUseCase(
         llm_engine=StubLLM(),
@@ -156,5 +170,36 @@ def test_visual_evidence_deduplicates_repeated_assets(tmp_path: Path) -> None:
     use_case = _use_case(settings, [duplicated, duplicated])
 
     result = use_case.execute(InboundPayloadDTO(user_input="muestrame el diagrama"))
+
+    assert len(result.visual_evidence) == 1
+
+
+def test_text_fragments_render_the_figures_on_their_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    first = settings.extracted_images_dir / "page2_fig1.png"
+    second = settings.extracted_images_dir / "page2_fig2.png"
+    first.write_bytes(b"png")
+    second.write_bytes(b"png")
+    text_chunk = _text_chunk(f"{first}|{second}")
+    use_case = _use_case(settings, [text_chunk])
+
+    result = use_case.execute(InboundPayloadDTO(user_input="muestrame el proceso"))
+
+    assert len(result.visual_evidence) == 2
+    assert all(evidence.page == 2 for evidence in result.visual_evidence)
+    assert "TinyML en el borde" in result.visual_evidence[0].caption
+
+
+def test_text_and_visual_chunks_referencing_same_asset_are_deduplicated(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    image = settings.extracted_images_dir / "shared.png"
+    image.write_bytes(b"png")
+    use_case = _use_case(settings, [_text_chunk(str(image)), _visual_chunk(str(image))])
+
+    result = use_case.execute(InboundPayloadDTO(user_input="muestrame el proceso"))
 
     assert len(result.visual_evidence) == 1

@@ -137,44 +137,57 @@ class OrchestrateAgentUseCase:
     def _collect_visual_evidence(
         self, chunks: Sequence[ManualChunk]
     ) -> tuple[VisualEvidenceDTO, ...]:
-        """Resolve indexed visual assets to renderable, in-scope local paths."""
+        """Resolve indexed visual assets to renderable, in-scope local paths.
+
+        Both dedicated visual chunks and text fragments that reference the
+        figures on their page are considered, because top-k retrieval often
+        ranks the surrounding prose above the image chunk. Assets are
+        deduplicated by resolved path and capped to keep the chat compact.
+        """
         assets_dir = self._settings.extracted_images_dir.resolve()
         evidence: list[VisualEvidenceDTO] = []
         seen: set[str] = set()
 
         for chunk in chunks:
-            if not chunk.is_visual:
-                continue
-            raw_path = chunk.metadata.get("image_path")
-            if not isinstance(raw_path, str) or not raw_path.strip():
-                continue
+            for raw_path in self._chunk_image_paths(chunk):
+                resolved = self._resolve_asset_path(raw_path, assets_dir)
+                if resolved is None:
+                    logger.warning(
+                        "VISUAL_EVIDENCE | chunk_id=%s | action=skipped | reason=unresolved_path",
+                        chunk.chunk_id,
+                    )
+                    continue
 
-            resolved = self._resolve_asset_path(raw_path, assets_dir)
-            if resolved is None:
-                logger.warning(
-                    "VISUAL_EVIDENCE | chunk_id=%s | action=skipped | reason=unresolved_path",
-                    chunk.chunk_id,
+                key = str(resolved)
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidence.append(
+                    VisualEvidenceDTO(
+                        image_path=key,
+                        image_title=str(chunk.metadata.get("image_title") or ""),
+                        document_title=str(
+                            chunk.metadata.get("document_title")
+                            or chunk.metadata.get("source")
+                            or ""
+                        ),
+                        page=chunk.page,
+                    )
                 )
-                continue
-
-            key = str(resolved)
-            if key in seen:
-                continue
-            seen.add(key)
-            evidence.append(
-                VisualEvidenceDTO(
-                    image_path=key,
-                    image_title=str(chunk.metadata.get("image_title") or ""),
-                    document_title=str(
-                        chunk.metadata.get("document_title") or chunk.metadata.get("source") or ""
-                    ),
-                    page=chunk.page,
-                )
-            )
-            if len(evidence) >= MAX_VISUAL_EVIDENCE:
-                break
+                if len(evidence) >= MAX_VISUAL_EVIDENCE:
+                    return tuple(evidence)
 
         return tuple(evidence)
+
+    @staticmethod
+    def _chunk_image_paths(chunk: ManualChunk) -> list[str]:
+        single = chunk.metadata.get("image_path")
+        if isinstance(single, str) and single.strip():
+            return [single.strip()]
+        multiple = chunk.metadata.get("image_paths")
+        if isinstance(multiple, str):
+            return [path.strip() for path in multiple.split("|") if path.strip()]
+        return []
 
     @staticmethod
     def _resolve_asset_path(raw_path: str, assets_dir: Path) -> Path | None:

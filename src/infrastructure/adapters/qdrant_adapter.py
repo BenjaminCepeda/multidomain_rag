@@ -164,28 +164,7 @@ class QdrantAdapter(IVectorRepository):
                             "SPARSE_VECTOR_SKIPPED | chunk_id=%s | error=%s", chunk.chunk_id, exc
                         )
                 payload_dict = self._build_payload(chunk)
-                import uuid
-
-                from src.domain.models.ids import ChunkId, DocumentId
-
-                doc_id_for_hash = (
-                    chunk.document_id
-                    if chunk.document_id is not None
-                    else DocumentId.from_source(str(uuid.uuid4()))
-                )
-                img_paths_hash = payload_dict.get("image_paths")
-                img_h = img_paths_hash if isinstance(img_paths_hash, str) else None
-                point_id = ChunkId.from_content(
-                    doc_id_for_hash,
-                    str(chunk.content),
-                    int(chunk.page),
-                    chunk.section,
-                    img_h,
-                )
-                try:
-                    point_id_int = abs(hash(str(point_id))) % (10**12)
-                except Exception:
-                    point_id_int = start + idx
+                point_id_int = chunk.chunk_id.stable_point_id()
                 points.append(
                     PointStruct(
                         id=point_id_int,
@@ -371,7 +350,7 @@ class QdrantAdapter(IVectorRepository):
 
     # --- Backward-compatible helpers ---
     def save_chunks(self, chunks: list[ManualChunk]) -> None:
-        vectors = self._embedding.embed_batch([c.content for c in chunks])
+        vectors = self._embedding.embed_chunks(chunks)
         self.upsert(chunks, vectors)
 
     def search_similar(self, query: str, limit: int = 3) -> list[ManualChunk]:

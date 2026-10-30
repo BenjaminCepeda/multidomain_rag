@@ -63,11 +63,14 @@ class IngestManualUseCase:
         total_images = 0
         controlled_exceptions = 0
         start_time = time.perf_counter()
+        extract_seconds = 0.0
+        embed_seconds = 0.0
+        upsert_seconds = 0.0
+        embedded_chars = 0
         lock = Lock()
 
         all_chunks: list[ManualChunk] = []
         file_success: dict[str, bool] = {}
-        points: list[object] = []
 
         if total_files == 0:
             return IngestionResultDTO(
@@ -116,6 +119,7 @@ class IngestManualUseCase:
         logger.info(
             "INGEST_CONFIG | max_workers=%d (source=settings.ingest_max_workers)", max_workers
         )
+        extract_started = time.perf_counter()
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(self._process_file, p): p for p in valid_paths}
             for fut in as_completed(futures):
@@ -134,6 +138,9 @@ class IngestManualUseCase:
                         failed_files.append(path_str)
                         controlled_exceptions += 1
                     continue
+        extract_seconds = time.perf_counter() - extract_started
+
+        visual_chunks = sum(1 for chunk in all_chunks if chunk.is_visual)
 
         if all_chunks:
             total_chunks = len(all_chunks)
@@ -141,10 +148,14 @@ class IngestManualUseCase:
                 end = min(start + MICRO_BATCH_SIZE, total_chunks)
                 batch = all_chunks[start:end]
                 try:
-                    vectors = self._embedding.embed_batch([c.content for c in batch])
+                    embed_started = time.perf_counter()
+                    vectors = self._embedding.embed_chunks(batch)
+                    embed_seconds += time.perf_counter() - embed_started
+                    embedded_chars += sum(len(chunk.embedding_input) for chunk in batch)
+                    upsert_started = time.perf_counter()
                     self._repository.upsert(batch, vectors)
+                    upsert_seconds += time.perf_counter() - upsert_started
                     indexed_chunks += len(batch)
-                    points.extend(batch)
                     if progress_callback:
                         overall = (end / total_chunks) * 0.99
                         msg = f"Indexando lote {end}/{total_chunks}"
@@ -160,13 +171,21 @@ class IngestManualUseCase:
         documents_processed = sum(1 for v in file_success.values() if v)
         duration_seconds = time.perf_counter() - start_time
         logger.info(
-            "INGEST_METRICS | total_s=%.3f | files_ok=%d | files_fail=%d "
-            "| chunks=%d | images=%d | exceptions=%d",
+            "INGEST_METRICS | total_s=%.3f | extract_s=%.3f | embed_s=%.3f | upsert_s=%.3f "
+            "| files_ok=%d | files_fail=%d | chunks=%d | visuals=%d | images=%d "
+            "| embedded_chars=%d | micro_batch_size=%d | embed_batch_size=%d | exceptions=%d",
             duration_seconds,
+            extract_seconds,
+            embed_seconds,
+            upsert_seconds,
             documents_processed,
             len(failed_files),
             indexed_chunks,
+            visual_chunks,
             total_images,
+            embedded_chars,
+            MICRO_BATCH_SIZE,
+            self._settings.embedding_batch_size,
             controlled_exceptions,
         )
 

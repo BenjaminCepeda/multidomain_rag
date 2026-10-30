@@ -16,3 +16,15 @@ class ManualChunk:
     is_visual: bool = False
     document_id: DocumentId | None = None
     metadata: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    embedding_text: str | None = None
+
+    @property
+    def embedding_input(self) -> str:
+        """Return the compact text used for dense embeddings.
+
+        Visual chunks keep a rich ``content`` for payloads and the LLM while
+        exposing a bounded ``embedding_text`` to avoid padding amplification.
+        """
+        if self.embedding_text and self.embedding_text.strip():
+            return self.embedding_text
+        return self.content

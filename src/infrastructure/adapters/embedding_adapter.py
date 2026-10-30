@@ -27,6 +27,9 @@ class SentenceTransformerEmbeddingAdapter(IEmbeddingService):
             model_name = model_name or settings.embedding_model_name
             cache_folder = cache_folder or settings.hf_model_cache
             expected_dim = expected_dim or settings.embedding_vector_dim
+            self._embedding_batch_size = settings.embedding_batch_size
+        else:
+            self._embedding_batch_size = 32
 
         self._model_name = model_name or "BAAI/bge-m3"
         self._expected_dim = expected_dim
@@ -56,10 +59,15 @@ class SentenceTransformerEmbeddingAdapter(IEmbeddingService):
         vector = self._model.encode(text)
         return EmbeddingVector(values=tuple(float(x) for x in vector))
 
-    def embed_batch(self, texts: Sequence[str], batch_size: int = 32) -> list[EmbeddingVector]:
+    def embed_batch(
+        self, texts: Sequence[str], batch_size: int | None = None
+    ) -> list[EmbeddingVector]:
         if not texts:
             return []
-        vectors = self._model.encode(list(texts), batch_size=batch_size)
+        resolved_batch_size = self._embedding_batch_size if batch_size is None else batch_size
+        if resolved_batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer.")
+        vectors = self._model.encode(list(texts), batch_size=resolved_batch_size)
         return [EmbeddingVector(values=tuple(float(x) for x in v)) for v in vectors]
 
     def dimension(self) -> int:

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     llm_model_chat: str = Field(default="qwen3-14b")
     llm_model_vision: str = Field(default="qwen3-14b")
     llm_timeout_seconds: int = Field(default=180, ge=1)
+    llm_context_max_chars_per_chunk: int = Field(default=900, ge=100, le=8000)
 
     # --- FILES PRECESSED PATHS ---
     data_files_path: str = Field(default="./data")

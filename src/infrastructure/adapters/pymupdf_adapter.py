@@ -16,6 +16,7 @@ from src.domain.exceptions.core_errors import DataIncompleteError
 from src.domain.models.document import ManualChunk
 from src.domain.models.ids import ChunkId, DocumentId
 from src.domain.ports.document_extractor import IDocumentExtractor
+from src.domain.services.file_fingerprint import compute_file_sha256
 from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -320,9 +321,16 @@ class PyMuPDFAdapter(IDocumentExtractor):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
-    def extract_chunks(self, file_path: str) -> list[ManualChunk]:
+    def extract_chunks(self, file_path: str, file_hash: str | None = None) -> list[ManualChunk]:
         if not os.path.exists(file_path):
             raise DataIncompleteError(f"El extractor fisico no encontro el archivo en: {file_path}")
+
+        try:
+            resolved_hash = file_hash or compute_file_sha256(file_path)
+        except OSError as exc:
+            raise DataIncompleteError(
+                f"No se pudo calcular la huella del archivo: {file_path}", exc
+            ) from exc
 
         try:
             doc = fitz.open(file_path)
@@ -332,7 +340,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
             ) from exc
 
         try:
-            return self._extract_document(doc, file_path)
+            return self._extract_document(doc, file_path, resolved_hash)
         except DataIncompleteError:
             raise
         except Exception as exc:
@@ -342,7 +350,9 @@ class PyMuPDFAdapter(IDocumentExtractor):
         finally:
             doc.close()
 
-    def _extract_document(self, doc: fitz.Document, file_path: str) -> list[ManualChunk]:
+    def _extract_document(
+        self, doc: fitz.Document, file_path: str, file_hash: str
+    ) -> list[ManualChunk]:
         file_name = os.path.basename(file_path)
         document_id = DocumentId.from_source(file_path)
         doc_hash = hashlib.md5(str(document_id).encode()).hexdigest()[:12]
@@ -393,6 +403,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
                         "source": file_name,
                         "document_name": file_name,
                         "document_title": document_title,
+                        "file_hash": file_hash,
                     }
                     if images:
                         metadata["image_paths"] = "|".join(image.path for image in images)
@@ -419,6 +430,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
                         document_title=document_title,
                         document_name=file_name,
                         document_context_summary=document_context_summary,
+                        file_hash=file_hash,
                         image=image,
                         image_index=image_index,
                         page_number=page_number,
@@ -488,11 +500,10 @@ class PyMuPDFAdapter(IDocumentExtractor):
         for img_index, img in enumerate(image_list):
             xref = img[0]
             try:
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image.get("image")
-                if not image_bytes:
+                loaded = self._load_renderable_image(doc, xref)
+                if loaded is None:
                     continue
-                extension = base_image.get("ext", "png")
+                image_bytes, extension = loaded
                 image_name = f"{doc_hash}_p{page_number}_i{img_index}.{extension}"
                 image_path = images_dir / image_name
                 image_path.write_bytes(image_bytes)
@@ -522,6 +533,62 @@ class PyMuPDFAdapter(IDocumentExtractor):
         return images
 
     @staticmethod
+    def _load_renderable_image(doc: fitz.Document, xref: int) -> tuple[bytes, str] | None:
+        """Load image bytes, forcing a safe RGB conversion when needed.
+
+        ``Document.extract_image`` preserves the embedded colorspace, so CMYK
+        or multi-channel pixmaps can be written as invalid image files that
+        render as black boxes. Standard RGB/Gray images keep their original
+        encoded bytes; any other colorspace is converted to RGB first.
+        """
+        try:
+            pixmap = fitz.Pixmap(doc, xref)
+        except Exception as exc:
+            logger.debug("PDF_IMAGES | action=pixmap_load_failed | xref=%d | error=%s", xref, exc)
+            pixmap = None
+
+        if pixmap is not None:
+            colorspace = pixmap.colorspace
+            if colorspace is None:
+                # Alpha-only masks are not standalone, renderable images.
+                return None
+
+            is_standard_gray = (
+                colorspace.name == "DeviceGray" and pixmap.n == 1 and not pixmap.alpha
+            )
+            is_standard_rgb = colorspace.name == "DeviceRGB" and pixmap.n == 3 and not pixmap.alpha
+
+            if is_standard_gray or is_standard_rgb:
+                original = PyMuPDFAdapter._extract_original_image(doc, xref)
+                if original is not None:
+                    return original
+
+            try:
+                converted = (
+                    pixmap
+                    if (is_standard_gray or is_standard_rgb)
+                    else fitz.Pixmap(fitz.csRGB, pixmap)
+                )
+                return converted.tobytes("png"), "png"
+            except Exception as exc:
+                logger.warning("PDF_IMAGES | action=color_conversion_failed | error=%s", exc)
+
+        return PyMuPDFAdapter._extract_original_image(doc, xref)
+
+    @staticmethod
+    def _extract_original_image(doc: fitz.Document, xref: int) -> tuple[bytes, str] | None:
+        try:
+            base_image = doc.extract_image(xref)
+        except Exception as exc:
+            logger.warning("PDF_IMAGES | action=extract_failed | error=%s", exc)
+            return None
+
+        image_bytes = base_image.get("image")
+        if not image_bytes:
+            return None
+        return image_bytes, str(base_image.get("ext") or "png")
+
+    @staticmethod
     def _image_bounds(page: fitz.Page, xref: int) -> tuple[float | None, float | None]:
         try:
             rects = page.get_image_rects(xref)
@@ -540,6 +607,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
         document_title: str,
         document_name: str,
         document_context_summary: str,
+        file_hash: str,
         image: ExtractedImage,
         image_index: int,
         page_number: int,
@@ -582,6 +650,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
             "document_name": document_name,
             "document_title": document_title,
             "document_context_summary": document_context_summary,
+            "file_hash": file_hash,
             "image_title": image_title,
             "theme_summary": theme_summary,
             "surrounding_text_context": surrounding,

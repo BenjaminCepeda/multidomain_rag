@@ -27,6 +27,9 @@ class IVectorRepository(ABC):
     def exists_by_id(self, chunk_id: str) -> bool: ...
 
     @abstractmethod
+    def exists_by_file_hash(self, file_hash: str) -> bool: ...
+
+    @abstractmethod
     def clear(self) -> None: ...
 
     @abstractmethod

@@ -31,7 +31,9 @@ class StubEmbedding(IEmbeddingService):
     def embed_text(self, text: str) -> EmbeddingVector:
         return EmbeddingVector(values=(0.1, 0.2))
 
-    def embed_batch(self, texts: Sequence[str], batch_size: int = 32) -> list[EmbeddingVector]:
+    def embed_batch(
+        self, texts: Sequence[str], batch_size: int | None = None
+    ) -> list[EmbeddingVector]:
         return [EmbeddingVector(values=(0.1, 0.2)) for _ in texts]
 
     def dimension(self) -> int:

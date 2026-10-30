@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # --- Embeddings ---
     embedding_model_name: str = Field(default="BAAI/bge-m3")
     embedding_vector_dim: int = Field(default=1024, ge=1)
+    embedding_batch_size: int = Field(default=32, ge=1, le=1024)
     hf_model_cache: str = Field(default="./.cache/models")
 
     # --- Ingestion ---

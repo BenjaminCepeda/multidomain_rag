@@ -69,5 +69,15 @@ class ChunkId:
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         return cls(value=f"{document_id}:sha256:{digest}")
 
+    def stable_point_id(self) -> int:
+        """Derive a deterministic Qdrant point id from this chunk id.
+
+        Qdrant accepts unsigned 64-bit integers. Masking to 63 bits keeps the
+        value compatible with signed serializers while remaining stable across
+        processes, unlike Python's randomized ``hash()``.
+        """
+        digest = hashlib.sha256(self.value.encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
+
     def __str__(self) -> str:
         return self.value

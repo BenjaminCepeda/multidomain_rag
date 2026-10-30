@@ -65,6 +65,16 @@ def test_visual_chunks_carry_macro_and_micro_context(tmp_path: Path) -> None:
     assert "inferencia" in str(metadata["surrounding_text_context"]).lower()
     assert "TinyML en el borde" in visuals[0].content
 
+    embedding_text = visuals[0].embedding_text
+    assert embedding_text is not None
+    assert len(embedding_text) <= 400
+    assert "TinyML en el borde" in embedding_text
+    assert "inferencia" in embedding_text.lower()
+    assert "Flujo de inferencia" in embedding_text
+    assert "Contexto:" in embedding_text
+    assert "Contexto del documento" in visuals[0].content
+    assert embedding_text != visuals[0].content
+
     image_path = Path(str(metadata["image_path"]))
     assert image_path.is_file()
     assert image_path.is_relative_to(settings.extracted_images_dir.resolve())
@@ -81,6 +91,7 @@ def test_text_chunks_reference_document_context(tmp_path: Path) -> None:
     assert text_chunks
     assert all(chunk.metadata["document_title"] == "EdgeAI manual" for chunk in text_chunks)
     assert all(chunk.metadata["page_number"] == 1 for chunk in text_chunks)
+    assert all(chunk.embedding_text is None for chunk in text_chunks)
 
 
 def test_visual_chunk_ids_do_not_collide_with_text_chunks(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ def test_settings_defaults() -> None:
     s = Settings(_env_file=None)
     assert s.llm_model_chat == "qwen3-14b"
     assert s.embedding_vector_dim == 1024
+    assert s.embedding_batch_size == 32
     assert s.gradio_port == 7860
 
 

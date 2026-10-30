@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 
 from src.domain.models.ids import ChunkId, DocumentId
@@ -41,3 +42,22 @@ def test_chunk_id_build_invalid_page() -> None:
         pass
     else:
         raise AssertionError("Expected ValueError")
+
+
+def test_stable_point_id_is_sha256_derived_and_repeatable() -> None:
+    chunk_id = ChunkId("doc-uuid:root:2:3")
+    expected = (
+        int.from_bytes(hashlib.sha256(chunk_id.value.encode("utf-8")).digest()[:8], "big")
+        & 0x7FFF_FFFF_FFFF_FFFF
+    )
+
+    assert chunk_id.stable_point_id() == expected
+    assert chunk_id.stable_point_id() == chunk_id.stable_point_id()
+    assert 0 <= chunk_id.stable_point_id() < 2**63
+
+
+def test_stable_point_id_differs_between_chunks() -> None:
+    first = ChunkId("doc-uuid:root:2:3")
+    second = ChunkId("doc-uuid:root:2:4")
+
+    assert first.stable_point_id() != second.stable_point_id()

@@ -37,6 +37,9 @@ class FakeVectorRepository(IVectorRepository):
     def exists_by_id(self, chunk_id: str) -> bool:
         return False
 
+    def exists_by_file_hash(self, file_hash: str) -> bool:
+        return False
+
     def clear(self) -> None:
         if self.clear_error is not None:
             raise self.clear_error

@@ -5,6 +5,9 @@ from collections.abc import Sequence
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
     PointStruct,
     SparseIndexParams,
     SparseVector,
@@ -289,6 +292,30 @@ class QdrantAdapter(IVectorRepository):
 
     def exists_by_id(self, chunk_id: str) -> bool:
         return False
+
+    def exists_by_file_hash(self, file_hash: str) -> bool:
+        """Return whether the collection already holds points for this file hash."""
+        if not file_hash:
+            return False
+        self._ensure_collection()
+        try:
+            result = self._client.count(
+                collection_name=self._collection_name,
+                count_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="file_hash",
+                            match=MatchValue(value=file_hash),
+                        )
+                    ]
+                ),
+                exact=True,
+            )
+        except Exception as exc:
+            raise VectorStorageError(
+                "Fallo al comprobar la huella del documento en Qdrant.", exc
+            ) from exc
+        return result.count > 0
 
     def clear(self) -> None:
         try:

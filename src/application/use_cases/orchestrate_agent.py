@@ -23,6 +23,29 @@ MAX_VISUAL_EVIDENCE = 4
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
 
+def _clip_context(text: str, max_chars: int) -> str:
+    """Bound one retrieved fragment before it enters the LLM prompt.
+
+    The cut prefers a natural boundary near the limit so a local model does
+    not receive a mid-token fragment. Source, page and visual metadata travel
+    in the prompt header and are therefore never discarded.
+    """
+    stripped = text.strip()
+    if len(stripped) <= max_chars:
+        return stripped
+
+    window = stripped[: max_chars - 1]
+    cut = max(
+        window.rfind("\n"),
+        window.rfind(". "),
+        window.rfind("; "),
+        window.rfind(" "),
+    )
+    if cut < max_chars // 2:
+        cut = len(window)
+    return window[:cut].rstrip() + "…"
+
+
 class OrchestrateAgentUseCase:
     """Use case coordinating the multimodal agent tools."""
 
@@ -78,9 +101,12 @@ class OrchestrateAgentUseCase:
                     visual_evidence = self._collect_visual_evidence(chunks)
 
                 contexto_sintesis = []
+                max_chars = self._settings.llm_context_max_chars_per_chunk
+                context_chars = 0
+                truncated_chunks = 0
                 for i, c in enumerate(chunks):
                     src = c.metadata.get("source") or c.metadata.get("filename") or "Desconocido"
-                    pval = c.metadata.get("page", "N/A")
+                    pval = c.metadata.get("page") or c.metadata.get("page_number") or c.page
                     header = f"=== FRAGMENTO {i + 1} ===\nFUENTE: {src}\nPAGINA: {pval}\n"
                     document_title = c.metadata.get("document_title")
                     image_title = c.metadata.get("image_title")
@@ -91,7 +117,20 @@ class OrchestrateAgentUseCase:
                     img_paths = c.metadata.get("image_paths")
                     if img_paths:
                         header += f"IMAGE_PATHS: {img_paths}\n"
-                    contexto_sintesis.append(header + "\n" + c.content)
+
+                    body = _clip_context(c.content, max_chars)
+                    if len(body) < len(c.content.strip()):
+                        truncated_chunks += 1
+                    context_chars += len(header) + 1 + len(body)
+                    contexto_sintesis.append(header + "\n" + body)
+
+                logger.info(
+                    "PROMPT_CONTEXT | chunks=%d | chars=%d | max_chars_per_chunk=%d | truncated=%d",
+                    len(contexto_sintesis),
+                    context_chars,
+                    max_chars,
+                    truncated_chunks,
+                )
 
             elif used_tool == "analizar_imagen":
                 if not payload.image_path:

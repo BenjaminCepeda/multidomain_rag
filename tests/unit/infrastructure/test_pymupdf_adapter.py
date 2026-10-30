@@ -2,6 +2,7 @@ from pathlib import Path
 
 import fitz
 
+from src.domain.services.file_fingerprint import compute_file_sha256
 from src.infrastructure.adapters.pymupdf_adapter import PyMuPDFAdapter
 from src.infrastructure.config.settings import Settings
 
@@ -33,6 +34,17 @@ def _make_pdf(path: Path, title: str) -> None:
     page.insert_image(fitz.Rect(72, 170, 180, 260), pixmap=pixmap)
 
     doc.set_metadata({"title": title})
+    doc.save(str(path))
+    doc.close()
+
+
+def _make_cmyk_pdf(path: Path) -> None:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Figura 1: conversion de color CMYK", fontsize=12)
+    pixmap = fitz.Pixmap(fitz.csCMYK, fitz.IRect(0, 0, 24, 24), False)
+    pixmap.set_rect(pixmap.irect, (0, 255, 255, 0))
+    page.insert_image(fitz.Rect(72, 100, 180, 208), pixmap=pixmap)
     doc.save(str(path))
     doc.close()
 
@@ -78,6 +90,7 @@ def test_visual_chunks_carry_macro_and_micro_context(tmp_path: Path) -> None:
     image_path = Path(str(metadata["image_path"]))
     assert image_path.is_file()
     assert image_path.is_relative_to(settings.extracted_images_dir.resolve())
+    assert metadata["file_hash"] == compute_file_sha256(pdf_path)
 
 
 def test_text_chunks_reference_document_context(tmp_path: Path) -> None:
@@ -103,3 +116,39 @@ def test_visual_chunk_ids_do_not_collide_with_text_chunks(tmp_path: Path) -> Non
     chunk_ids = [str(chunk.chunk_id) for chunk in chunks]
 
     assert len(chunk_ids) == len(set(chunk_ids))
+
+
+def test_cmyk_images_are_normalized_to_rgb_png(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "cmyk_manual.pdf"
+    _make_cmyk_pdf(pdf_path)
+    settings = _settings(tmp_path)
+
+    chunks = PyMuPDFAdapter(settings).extract_chunks(str(pdf_path))
+    visuals = [chunk for chunk in chunks if chunk.is_visual]
+
+    assert len(visuals) == 1
+    image_path = Path(str(visuals[0].metadata["image_path"]))
+    assert image_path.suffix == ".png"
+
+    pixmap = fitz.Pixmap(str(image_path))
+    assert pixmap.colorspace is not None
+    assert pixmap.colorspace.name == "DeviceRGB"
+    assert pixmap.n == 3
+    red, green, blue = pixmap.pixel(0, 0)[:3]
+    assert red > 150
+    assert green < 100
+    assert blue < 100
+
+
+def test_text_chunks_carry_the_source_file_hash(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "EdgeAI_manual.pdf"
+    _make_pdf(pdf_path, "EdgeAI manual")
+    settings = _settings(tmp_path)
+
+    chunks = PyMuPDFAdapter(settings).extract_chunks(str(pdf_path))
+    text_chunks = [chunk for chunk in chunks if not chunk.is_visual]
+
+    assert text_chunks
+    assert all(
+        chunk.metadata["file_hash"] == compute_file_sha256(pdf_path) for chunk in text_chunks
+    )

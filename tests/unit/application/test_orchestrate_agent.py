@@ -1,5 +1,8 @@
+import logging
 from collections.abc import Sequence
 from pathlib import Path
+
+import pytest
 
 from src.application.dtos.agent_dtos import InboundPayloadDTO
 from src.application.use_cases.orchestrate_agent import OrchestrateAgentUseCase
@@ -14,10 +17,14 @@ from src.infrastructure.config.settings import Settings
 
 
 class StubLLM(ILLMEngine):
+    def __init__(self) -> None:
+        self.last_context: list[str] = []
+
     def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision:
         return OrchestratorDecision(razonamiento="requiere manual", herramienta="buscar_manual")
 
     def generate_response(self, context: Sequence[str], user_input: str) -> str:
+        self.last_context = list(context)
         return "respuesta sintetizada"
 
     def analyze_image(self, image_path: str) -> str:
@@ -62,6 +69,9 @@ class StubRepository(IVectorRepository):
         return len(self._chunks)
 
     def exists_by_id(self, chunk_id: str) -> bool:
+        return False
+
+    def exists_by_file_hash(self, file_hash: str) -> bool:
         return False
 
     def clear(self) -> None:
@@ -111,9 +121,11 @@ def _text_chunk(image_paths: str, page: int = 2) -> ManualChunk:
     )
 
 
-def _use_case(settings: Settings, chunks: list[ManualChunk]) -> OrchestrateAgentUseCase:
+def _use_case(
+    settings: Settings, chunks: list[ManualChunk], llm: StubLLM | None = None
+) -> OrchestrateAgentUseCase:
     return OrchestrateAgentUseCase(
-        llm_engine=StubLLM(),
+        llm_engine=llm or StubLLM(),
         vector_repo=StubRepository(chunks),
         embedding=StubEmbedding(),
         settings=settings,
@@ -205,3 +217,52 @@ def test_text_and_visual_chunks_referencing_same_asset_are_deduplicated(
     result = use_case.execute(InboundPayloadDTO(user_input="muestrame el proceso"))
 
     assert len(result.visual_evidence) == 1
+
+
+def test_prompt_context_is_clipped_per_chunk_and_keeps_source_metadata(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        data_files_path=str(tmp_path / "data"),
+        extracted_images_path="extracted_images",
+        llm_context_max_chars_per_chunk=200,
+    )
+    long_content = "PRIMERA FRASE. " + ("relleno " * 400)
+    chunk = ManualChunk(
+        chunk_id=ChunkId("long-1"),
+        content=long_content,
+        page=4,
+        metadata={
+            "source": "manual.pdf",
+            "page_number": 4,
+            "document_title": "Manual de inferencia",
+        },
+    )
+    llm = StubLLM()
+    use_case = _use_case(settings, [chunk], llm=llm)
+
+    caplog.set_level(logging.INFO)
+    use_case.execute(InboundPayloadDTO(user_input="explica el proceso"))
+
+    assert len(llm.last_context) == 1
+    prompt = llm.last_context[0]
+    assert "FUENTE: manual.pdf" in prompt
+    assert "PAGINA: 4" in prompt
+    assert "DOCUMENTO: Manual de inferencia" in prompt
+
+    _header, body = prompt.split("\n\n", 1)
+    assert len(body) <= settings.llm_context_max_chars_per_chunk
+    assert body.startswith("PRIMERA FRASE.")
+    assert body.endswith("…")
+    assert long_content not in prompt
+
+    metrics = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("PROMPT_CONTEXT")
+    )
+    assert "chunks=1" in metrics
+    assert "max_chars_per_chunk=200" in metrics
+    assert "truncated=1" in metrics
+    assert "relleno relleno relleno" not in caplog.text

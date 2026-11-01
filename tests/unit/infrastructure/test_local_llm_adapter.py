@@ -207,9 +207,29 @@ def test_router_is_bounded_and_disables_long_reasoning(
 
     assert decision.herramienta == "buscar_manual"
     payload = captured["json"]
-    assert payload["max_tokens"] <= 48
+    assert 32 <= payload["max_tokens"] <= 48
     assert payload["chat_template_kwargs"]["enable_thinking"] is False
-    assert captured["timeout"] == (1.5, 6.0)
+    assert captured["timeout"][0] == 1.5
+    assert 8.0 <= captured["timeout"][1] <= 10.0
+
+
+def test_router_timeout_is_reported_as_transport_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        raise requests.Timeout("read budget exhausted")
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    with pytest.raises(LLMInferenceError):
+        adapter.get_orchestrator_decision("consulta tecnica", False)
+
+    metrics = adapter.consume_call_metrics()
+    assert metrics is not None
+    assert metrics.operation == "route"
+    assert metrics.status == "timeout"
 
 
 def test_router_error_never_leaks_model_content(

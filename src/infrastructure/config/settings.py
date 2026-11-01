@@ -28,9 +28,12 @@ class Settings(BaseSettings):
     llm_context_max_chars_per_chunk: int = Field(default=900, ge=100, le=8000)
 
     # --- Router governance ---
-    llm_router_max_tokens: int = Field(default=48, ge=16, le=128)
+    # Classification of three options never needs a long completion: the
+    # 32-48 token window leaves room for the JSON envelope without inviting
+    # reasoning blocks, and the read budget absorbs ~8-10s of local load.
+    llm_router_max_tokens: int = Field(default=48, ge=32, le=48)
     llm_router_connect_timeout_seconds: float = Field(default=1.5, gt=0)
-    llm_router_read_timeout_seconds: float = Field(default=6.0, gt=0)
+    llm_router_read_timeout_seconds: float = Field(default=9.0, ge=8.0, le=10.0)
     llm_router_failure_threshold: int = Field(default=3, ge=1, le=20)
     llm_router_recovery_seconds: float = Field(default=60.0, ge=1)
 

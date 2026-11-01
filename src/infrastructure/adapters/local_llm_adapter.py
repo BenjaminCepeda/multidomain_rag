@@ -197,7 +197,7 @@ class LocalLLMAdapter(ILLMEngine):
                 else settings.extracted_images_dir
             )
         else:
-            self._router_timeout = (1.5, 6.0)
+            self._router_timeout = (1.5, 9.0)
             self._generation_connect_timeout = 3.0
             self._generation_read_timeout = float(timeout) if timeout is not None else 120.0
             self._vision_timeout = (3.0, 45.0)

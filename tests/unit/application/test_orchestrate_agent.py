@@ -11,6 +11,7 @@ from src.domain.models.agent import OrchestratorDecision
 from src.domain.models.document import ManualChunk
 from src.domain.models.embedding import EmbeddingVector
 from src.domain.models.ids import ChunkId
+from src.domain.models.telemetry import LLMCallMetrics
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.llm_engine import ILLMEngine
 from src.domain.ports.vector_repository import IVectorRepository
@@ -274,6 +275,18 @@ class FailingRouterLLM(StubLLM):
         raise LLMInferenceError("router down with sensitive detail")
 
 
+class TimeoutRouterLLM(FailingRouterLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self._metrics_consumed = False
+
+    def consume_call_metrics(self) -> LLMCallMetrics | None:
+        if self._metrics_consumed:
+            return None
+        self._metrics_consumed = True
+        return LLMCallMetrics(operation="route", status="timeout", total_seconds=9.0)
+
+
 class FailingGenerateLLM(StubLLM):
     def generate_response(self, context: Sequence[str], user_input: str) -> str:
         raise LLMInferenceError("generation boom with sensitive detail")
@@ -292,11 +305,30 @@ def test_router_failure_fails_open_to_deterministic_search(
     assert result.used_tool == "buscar_manual"
     assert result.is_degraded is True
     assert result.error_log == "LLMInferenceError"
+    assert result.response_text
     assert result.timings is not None
     assert result.timings.total_seconds >= result.timings.routing_seconds
     assert llm.last_context
     assert "ROUTER_FALLBACK" in caplog.text
     assert "TURN_TRACE" in caplog.text
+    assert "sensitive detail" not in caplog.text
+
+
+def test_router_fail_open_reports_transport_root_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    use_case = _use_case(settings, [_text_chunk("")], llm=TimeoutRouterLLM())
+
+    caplog.set_level(logging.INFO)
+    result = use_case.execute(InboundPayloadDTO(user_input="explica el proceso"))
+
+    assert result.used_tool == "buscar_manual"
+    assert result.is_degraded is True
+    assert result.error_log == "router_timeout"
+    assert result.response_text
+    assert "reason=router_timeout" in caplog.text
+    assert "error_code=router_timeout" in caplog.text
     assert "sensitive detail" not in caplog.text
 
 

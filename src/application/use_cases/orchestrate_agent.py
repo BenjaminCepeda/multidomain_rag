@@ -87,6 +87,7 @@ class OrchestrateAgentUseCase:
 
         try:
             routing_start = time.perf_counter()
+            router_metrics: LLMCallMetrics | None = None
             try:
                 decision = self._llm.get_orchestrator_decision(payload.user_input, has_image)
                 used_tool = (
@@ -103,15 +104,20 @@ class OrchestrateAgentUseCase:
                     if has_image and not payload.user_input.strip()
                     else "buscar_manual"
                 )
+            finally:
+                routing_seconds = time.perf_counter() - routing_start
+                router_metrics = self._llm.consume_call_metrics()
+
+            if router_degraded:
+                # Report the transport root cause (timeout, unavailable,
+                # circuit open, ...) instead of only the exception class.
+                error_code = self._router_root_cause(router_metrics, error_code)
                 logger.warning(
-                    "ROUTER_FALLBACK | turn_id=%s | tool=%s | error_code=%s",
+                    "ROUTER_FALLBACK | turn_id=%s | tool=%s | reason=%s",
                     turn_id,
                     used_tool,
                     error_code,
                 )
-            finally:
-                routing_seconds = time.perf_counter() - routing_start
-                self._llm.consume_call_metrics()
 
             logger.info(
                 "AGENT_ROUTE | turn_id=%s | tool=%s | fallback=%s",
@@ -354,6 +360,25 @@ class OrchestrateAgentUseCase:
         queue_wait = max(0.0, metrics.queue_wait_seconds)
         inference = max(0.0, generation_wall - image_prep - queue_wait)
         return image_prep, inference, metrics
+
+    @staticmethod
+    def _router_root_cause(metrics: LLMCallMetrics | None, fallback: str | None) -> str | None:
+        """Translate the adapter transport status into a precise degradation code.
+
+        The code is Zero-Log safe (no query, prompt or model output) and lets
+        the trace distinguish a slow router from an unavailable or open circuit.
+        """
+        if metrics is None:
+            return fallback
+        mapping = {
+            "timeout": "router_timeout",
+            "unavailable": "router_unavailable",
+            "circuit_open": "router_circuit_open",
+            "http_error": "router_http_error",
+            "transport_error": "router_transport_error",
+            "protocol_error": "router_protocol_error",
+        }
+        return mapping.get(metrics.status, fallback)
 
     def _collect_visual_evidence(
         self, chunks: Sequence[ManualChunk]

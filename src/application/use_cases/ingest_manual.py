@@ -49,10 +49,14 @@ class IngestManualUseCase:
                     if img_paths and isinstance(img_paths, str):
                         images_count += len([p for p in img_paths.split("|") if p])
                 except Exception as exc:
-                    logger.warning("IMG_COUNT | action=skipped | error=%s", exc)
+                    logger.warning("IMG_COUNT | action=skipped | error_type=%s", type(exc).__name__)
             return path_str, chunks, len(chunks), images_count
         except Exception as e:
-            logger.error(f"Error critico procesando {path_str}: {e!s}")
+            logger.error(
+                "INGEST_ERROR | source=%s | error_type=%s",
+                os.path.basename(path_str),
+                type(e).__name__,
+            )
             raise
 
     def execute(
@@ -93,18 +97,27 @@ class IngestManualUseCase:
                     failed_files.append(pstr)
                     continue
                 if not os.path.exists(pstr):
-                    logger.warning("Archivo huérfano o inexistente, se omite: %s", pstr)
+                    logger.warning(
+                        "INGEST_SKIP | action=missing | source=%s",
+                        os.path.basename(pstr),
+                    )
                     controlled_exceptions += 1
                     failed_files.append(pstr)
                     continue
                 if not os.path.isfile(pstr):
-                    logger.warning("Ruta no es un archivo, se omite: %s", pstr)
+                    logger.warning(
+                        "INGEST_SKIP | action=not_a_file | source=%s",
+                        os.path.basename(pstr),
+                    )
                     controlled_exceptions += 1
                     failed_files.append(pstr)
                     continue
                 valid_paths.append(pstr)
             except Exception as exc:
-                logger.warning("Error al validar ruta de archivo: %s", exc)
+                logger.warning(
+                    "INGEST_SKIP | action=invalid_path | error_type=%s",
+                    type(exc).__name__,
+                )
                 controlled_exceptions += 1
                 continue
 
@@ -127,7 +140,7 @@ class IngestManualUseCase:
             try:
                 file_hash = compute_file_sha256(pstr)
             except OSError as exc:
-                logger.warning("INGEST_HASH | action=failed | error=%s", exc)
+                logger.warning("INGEST_HASH | action=failed | error_type=%s", type(exc).__name__)
                 controlled_exceptions += 1
                 failed_files.append(pstr)
                 continue
@@ -145,7 +158,10 @@ class IngestManualUseCase:
             try:
                 already_indexed = self._repository.exists_by_file_hash(file_hash)
             except Exception as exc:
-                logger.warning("INGEST_DEDUP | action=check_failed | error=%s", exc)
+                logger.warning(
+                    "INGEST_DEDUP | action=check_failed | error_type=%s",
+                    type(exc).__name__,
+                )
                 already_indexed = False
 
             if already_indexed:
@@ -179,7 +195,11 @@ class IngestManualUseCase:
                             if chunks:
                                 all_chunks.extend(chunks)
                             total_images += i_count
-                        logger.info("Extraccion exitosa: %d chunks de %s", c_count, path_res)
+                        logger.info(
+                            "INGEST_EXTRACT | source=%s | chunks=%d",
+                            os.path.basename(path_res),
+                            c_count,
+                        )
                     except Exception:
                         with lock:
                             file_success[path_str] = False
@@ -209,7 +229,7 @@ class IngestManualUseCase:
                         msg = f"Indexando lote {end}/{total_chunks}"
                         progress_callback(min(overall, 0.99), msg)
                 except Exception as e:
-                    logger.error(f"Error en batch upsert: {e!s}")
+                    logger.error("INGEST_UPSERT | action=failed | error_type=%s", type(e).__name__)
                     controlled_exceptions += 1
                     continue
 

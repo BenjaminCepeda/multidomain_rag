@@ -23,8 +23,34 @@ class Settings(BaseSettings):
     llm_endpoint: str = Field(default="http://127.0.0.1:1234/v1")
     llm_model_chat: str = Field(default="qwen3-14b")
     llm_model_vision: str = Field(default="qwen3-14b")
+    # Kept for backwards compatibility; generation has its own budget below.
     llm_timeout_seconds: int = Field(default=180, ge=1)
     llm_context_max_chars_per_chunk: int = Field(default=900, ge=100, le=8000)
+
+    # --- Router governance ---
+    llm_router_max_tokens: int = Field(default=48, ge=16, le=128)
+    llm_router_connect_timeout_seconds: float = Field(default=1.5, gt=0)
+    llm_router_read_timeout_seconds: float = Field(default=6.0, gt=0)
+    llm_router_failure_threshold: int = Field(default=3, ge=1, le=20)
+    llm_router_recovery_seconds: float = Field(default=60.0, ge=1)
+
+    # --- Inference budgets and concurrency ---
+    llm_generation_connect_timeout_seconds: float = Field(default=3.0, gt=0)
+    llm_generation_read_timeout_seconds: float = Field(default=120.0, gt=0)
+    llm_vision_connect_timeout_seconds: float = Field(default=3.0, gt=0)
+    llm_vision_read_timeout_seconds: float = Field(default=45.0, gt=0)
+    llm_max_concurrency: int = Field(default=1, ge=1, le=16)
+    llm_queue_timeout_seconds: float = Field(default=30.0, gt=0)
+    llm_health_cache_seconds: float = Field(default=30.0, ge=0)
+
+    # --- Multimodal payload budget ---
+    vision_max_images_per_turn: int = Field(default=3, ge=1, le=8)
+    vision_max_long_edge_px: int = Field(default=1600, ge=256, le=4096)
+    vision_jpeg_quality: int = Field(default=80, ge=50, le=95)
+    vision_max_bytes_per_image: int = Field(default=1_500_000, ge=50_000)
+    vision_max_total_payload_bytes: int = Field(default=4_000_000, ge=100_000)
+    vision_thumbnail_long_edge_px: int = Field(default=512, ge=64, le=1024)
+    vision_token_divisor: int = Field(default=28, ge=1)
 
     # --- FILES PRECESSED PATHS ---
     data_files_path: str = Field(default="./data")

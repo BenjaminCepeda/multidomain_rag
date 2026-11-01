@@ -46,7 +46,10 @@ class UserInterfaceApplication:
                 sound.export(normalized_path, format="wav")
                 audio_path = normalized_path
             except Exception as pydub_err:
-                logging.warning(f"No se pudo normalizar con pydub: {pydub_err}")
+                logging.warning(
+                    "UI_AUDIO | action=normalize_failed | error_type=%s",
+                    type(pydub_err).__name__,
+                )
 
             return self._stt_engine.transcribe(audio_path)
         except Exception as e:
@@ -54,12 +57,13 @@ class UserInterfaceApplication:
 
     def process_user_interaction(
         self, message: str, staged_image: str | None, history: list[Any]
-    ) -> tuple[str, str | None, list[Any], str]:
+    ) -> tuple[str, str | None, list[Any], str, Any]:
         text_content = (message or "").strip()
         if not text_content and not staged_image:
-            return "", None, history, ""
+            return "", None, history, "", gr.update(value=[], visible=False)
 
         status_text = ""
+        original_evidence: list[str] = []
         try:
             outbound_dto = self._orchestrate_use_case.execute(
                 InboundPayloadDTO(user_input=text_content, image_path=staged_image)
@@ -71,11 +75,12 @@ class UserInterfaceApplication:
                     {
                         "role": "assistant",
                         "content": {
-                            "path": evidence.image_path,
+                            "path": evidence.display_path,
                             "alt_text": evidence.caption,
                         },
                     }
                 )
+                original_evidence.append(evidence.original_path or evidence.image_path)
             if outbound_dto.timings is not None:
                 status_text = (
                     f"Herramienta: {outbound_dto.used_tool} | "
@@ -91,7 +96,7 @@ class UserInterfaceApplication:
             if outbound_dto.visual_evidence:
                 status_text += f" | Imagenes: {len(outbound_dto.visual_evidence)}"
             if outbound_dto.is_degraded and outbound_dto.error_log:
-                status_text += f" | Error: {outbound_dto.error_log}"
+                status_text += f" | Codigo: {outbound_dto.error_log}"
         except DomainBaseError as e:
             history.append({"role": "user", "content": text_content})
             history.append({"role": "assistant", "content": f"Error del dominio: {e.message}"})
@@ -100,7 +105,13 @@ class UserInterfaceApplication:
             history.append({"role": "user", "content": text_content})
             history.append({"role": "assistant", "content": f"Error: {e!s}"})
             status_text = f"Error inesperado: {e!s}"
-        return "", None, history, status_text
+        return (
+            "",
+            None,
+            history,
+            status_text,
+            gr.update(value=original_evidence, visible=bool(original_evidence)),
+        )
 
     def refresh_status(self) -> str:
         return self._presenter.build_status()
@@ -140,7 +151,10 @@ class UserInterfaceApplication:
                 "Todas las fuentes eliminadas (Qdrant purgado).",
             )
         except Exception as e:
-            logging.error("UI_PURGE | action=clear_all_sources | status=failed | error=%s", e)
+            logging.error(
+                "UI_PURGE | action=clear_all_sources | status=failed | error_type=%s",
+                type(e).__name__,
+            )
             return gr.update(), f"Error al limpiar: {e!s}"
 
     def run_ingestion(self, files: Any, policy: str) -> Any:
@@ -277,6 +291,10 @@ class UserInterfaceApplication:
             with gr.Tab("Operacion"):
                 chatbot = gr.Chatbot(label="Historial", height=450, type="messages")
                 last_status = gr.Textbox(label="Estado del turno", lines=2, interactive=False)
+                with gr.Accordion("Evidencia original (bajo demanda)", open=False):
+                    evidence_gallery = gr.Gallery(
+                        label="", columns=4, height=180, allow_preview=True
+                    )
 
                 with gr.Column(elem_classes="input-container"):
                     with gr.Row(visible=False, elem_classes="preview-container") as preview_row:
@@ -414,7 +432,7 @@ class UserInterfaceApplication:
                 btn_send.click(
                     self.process_user_interaction,
                     [txt_input, staged_image, chatbot],
-                    [txt_input, staged_image, chatbot, last_status],
+                    [txt_input, staged_image, chatbot, last_status, evidence_gallery],
                 )
 
         return interface  # type: ignore[no-any-return]

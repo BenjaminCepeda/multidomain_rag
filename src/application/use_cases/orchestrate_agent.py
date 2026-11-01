@@ -1,6 +1,7 @@
 # src/application/use_cases/orchestrate_agent.py
 import logging
 import time
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from src.application.dtos.agent_dtos import (
 )
 from src.domain.exceptions.core_errors import DataIncompleteError, DomainBaseError
 from src.domain.models.document import ManualChunk
-from src.domain.models.telemetry import PhaseTimings
+from src.domain.models.telemetry import LLMCallMetrics, PhaseTimings, TurnTrace
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.llm_engine import ILLMEngine
 from src.domain.ports.vector_repository import IVectorRepository
@@ -19,7 +20,7 @@ from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-MAX_VISUAL_EVIDENCE = 4
+ALLOWED_TOOLS = frozenset({"buscar_manual", "analizar_imagen", "responder_directo"})
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
 
@@ -62,30 +63,77 @@ class OrchestrateAgentUseCase:
         self._settings = settings
 
     def execute(self, payload: InboundPayloadDTO) -> OutboundResponseDTO:
+        turn_id = uuid.uuid4().hex
         has_image: bool = payload.image_path is not None
         start_time = time.perf_counter()
 
+        routing_seconds = 0.0
+        embedding_seconds = 0.0
         retrieval_seconds = 0.0
+        evidence_seconds = 0.0
+        prompt_seconds = 0.0
+        image_prep_seconds = 0.0
+        vision_analysis_seconds = 0.0
         inference_seconds = 0.0
+        generation_started_at: float | None = None
+
+        context_chars = 0
+        truncated_chunks = 0
         visual_evidence: tuple[VisualEvidenceDTO, ...] = ()
+        used_tool = "orquestador"
+        current_phase = "router"
+        router_degraded = False
+        error_code: str | None = None
 
         try:
-            decision = self._llm.get_orchestrator_decision(payload.user_input, has_image)
+            routing_start = time.perf_counter()
+            try:
+                decision = self._llm.get_orchestrator_decision(payload.user_input, has_image)
+                used_tool = (
+                    decision.herramienta
+                    if decision.herramienta in ALLOWED_TOOLS
+                    else "buscar_manual"
+                )
+            except DomainBaseError as exc:
+                # Fail-open: a broken or slow router never blocks the turn.
+                router_degraded = True
+                error_code = type(exc).__name__
+                used_tool = (
+                    "analizar_imagen"
+                    if has_image and not payload.user_input.strip()
+                    else "buscar_manual"
+                )
+                logger.warning(
+                    "ROUTER_FALLBACK | turn_id=%s | tool=%s | error_code=%s",
+                    turn_id,
+                    used_tool,
+                    error_code,
+                )
+            finally:
+                routing_seconds = time.perf_counter() - routing_start
+                self._llm.consume_call_metrics()
 
-            allowed_tools = ["buscar_manual", "analizar_imagen", "responder_directo"]
-            used_tool = (
-                decision.herramienta if decision.herramienta in allowed_tools else "buscar_manual"
+            logger.info(
+                "AGENT_ROUTE | turn_id=%s | tool=%s | fallback=%s",
+                turn_id,
+                used_tool,
+                router_degraded,
             )
-
-            logger.info(f"Orquestador usando: {used_tool}")
 
             contexto_sintesis: list[str] = []
 
             if used_tool == "buscar_manual":
-                query_target = payload.user_input
-                logger.info("MANUAL_SEARCH | query_chars=%d", len(query_target))
+                current_phase = "embedding"
+                embedding_start = time.perf_counter()
+                query_vector = self._embedding.embed_text(payload.user_input)
+                embedding_seconds = time.perf_counter() - embedding_start
 
-                query_vector = self._embedding.embed_text(query_target)
+                current_phase = "retrieval"
+                logger.info(
+                    "MANUAL_SEARCH | turn_id=%s | query_chars=%d",
+                    turn_id,
+                    len(payload.user_input),
+                )
                 retrieval_start = time.perf_counter()
                 chunks: list[ManualChunk] = self._repo.search(
                     query_vector=query_vector, limit=3, min_score=0.20
@@ -94,16 +142,20 @@ class OrchestrateAgentUseCase:
 
                 if not chunks:
                     logger.warning(
-                        "MANUAL_SEARCH | action=no_results | query_chars=%d", len(query_target)
+                        "MANUAL_SEARCH | turn_id=%s | action=no_results | query_chars=%d",
+                        turn_id,
+                        len(payload.user_input),
                     )
                 else:
-                    logger.info(f"Recuperados {len(chunks)} fragmentos.")
+                    logger.info("MANUAL_SEARCH | turn_id=%s | fragments=%d", turn_id, len(chunks))
+                    current_phase = "evidence"
+                    evidence_start = time.perf_counter()
                     visual_evidence = self._collect_visual_evidence(chunks)
+                    evidence_seconds = time.perf_counter() - evidence_start
 
-                contexto_sintesis = []
+                current_phase = "prompt"
+                prompt_start = time.perf_counter()
                 max_chars = self._settings.llm_context_max_chars_per_chunk
-                context_chars = 0
-                truncated_chunks = 0
                 for i, c in enumerate(chunks):
                     src = c.metadata.get("source") or c.metadata.get("filename") or "Desconocido"
                     pval = c.metadata.get("page") or c.metadata.get("page_number") or c.page
@@ -114,7 +166,9 @@ class OrchestrateAgentUseCase:
                         header += f"DOCUMENTO: {document_title}\n"
                     if image_title:
                         header += f"IMAGEN: {image_title}\n"
-                    img_paths = c.metadata.get("image_paths")
+                    # The LLM consumes the optimized derivative, never the
+                    # full-resolution original kept for the UI.
+                    img_paths = c.metadata.get("vision_paths") or c.metadata.get("image_paths")
                     if img_paths:
                         header += f"IMAGE_PATHS: {img_paths}\n"
 
@@ -123,9 +177,12 @@ class OrchestrateAgentUseCase:
                         truncated_chunks += 1
                     context_chars += len(header) + 1 + len(body)
                     contexto_sintesis.append(header + "\n" + body)
+                prompt_seconds = time.perf_counter() - prompt_start
 
                 logger.info(
-                    "PROMPT_CONTEXT | chunks=%d | chars=%d | max_chars_per_chunk=%d | truncated=%d",
+                    "PROMPT_CONTEXT | turn_id=%s | chunks=%d | chars=%d | "
+                    "max_chars_per_chunk=%d | truncated=%d",
+                    turn_id,
                     len(contexto_sintesis),
                     context_chars,
                     max_chars,
@@ -135,43 +192,168 @@ class OrchestrateAgentUseCase:
             elif used_tool == "analizar_imagen":
                 if not payload.image_path:
                     raise DataIncompleteError("No se proporciono imagen.")
+                current_phase = "vision"
+                vision_start = time.perf_counter()
                 vision_analysis = self._llm.analyze_image(payload.image_path)
+                vision_analysis_seconds = time.perf_counter() - vision_start
+                vision_metrics = self._llm.consume_call_metrics()
+                if vision_metrics is not None:
+                    vision_analysis_seconds = max(
+                        0.0, vision_analysis_seconds - vision_metrics.queue_wait_seconds
+                    )
                 contexto_sintesis = [f"[FUENTE: imagen]\n{vision_analysis}"]
 
             elif used_tool == "responder_directo":
                 contexto_sintesis = ["No se requieren herramientas externas."]
 
-            inference_start = time.perf_counter()
+            current_phase = "inference"
+            generation_started_at = time.perf_counter()
             respuesta_final = self._llm.generate_response(contexto_sintesis, payload.user_input)
-            inference_seconds = time.perf_counter() - inference_start
+            generation_wall = time.perf_counter() - generation_started_at
+            generation_metrics = self._llm.consume_call_metrics()
+            image_prep_seconds, inference_seconds, image_stats = self._split_generation(
+                generation_wall, generation_metrics
+            )
 
             total_seconds = time.perf_counter() - start_time
+            current_phase = "complete"
             timings = PhaseTimings(
+                routing_seconds=routing_seconds,
+                embedding_seconds=embedding_seconds,
                 retrieval_seconds=retrieval_seconds,
+                evidence_seconds=evidence_seconds,
+                prompt_seconds=prompt_seconds,
+                image_prep_seconds=image_prep_seconds,
+                vision_analysis_seconds=vision_analysis_seconds,
                 inference_seconds=inference_seconds,
                 total_seconds=total_seconds,
             )
-            logger.info(f"PHASE_TIMINGS | {timings.format_summary()}")
+            trace = TurnTrace(
+                turn_id=turn_id,
+                tool=used_tool,
+                timings=timings,
+                images_attached=image_stats.images_attached,
+                images_skipped=image_stats.images_skipped,
+                image_bytes=image_stats.image_bytes,
+                image_pixels=image_stats.image_pixels,
+                payload_bytes=image_stats.payload_bytes,
+                context_chars=context_chars,
+                truncated_chunks=truncated_chunks,
+                degraded=router_degraded,
+                degraded_phase="router" if router_degraded else None,
+                error_code=error_code,
+                status="degraded" if router_degraded else "ok",
+            )
+            logger.info(trace.format_line())
 
             return OutboundResponseDTO(
                 response_text=respuesta_final,
-                is_degraded=False,
+                is_degraded=router_degraded,
                 used_tool=used_tool,
+                error_log=error_code,
+                elapsed_seconds=total_seconds,
+                timings=timings,
+                visual_evidence=visual_evidence,
+                turn_id=turn_id,
+            )
+
+        except DomainBaseError as exc:
+            code = type(exc).__name__
+            # Attribute the wall time already spent in generation so a failed
+            # turn still reports where the budget went.
+            if generation_started_at is not None and inference_seconds == 0.0:
+                inference_seconds = max(0.0, time.perf_counter() - generation_started_at)
+            total_seconds = time.perf_counter() - start_time
+            timings = PhaseTimings(
+                routing_seconds=routing_seconds,
+                embedding_seconds=embedding_seconds,
+                retrieval_seconds=retrieval_seconds,
+                evidence_seconds=evidence_seconds,
+                prompt_seconds=prompt_seconds,
+                image_prep_seconds=image_prep_seconds,
+                vision_analysis_seconds=vision_analysis_seconds,
+                inference_seconds=inference_seconds,
+                total_seconds=total_seconds,
+            )
+            logger.error(
+                "ORCHESTRATION_ERROR | turn_id=%s | phase=%s | error_code=%s",
+                turn_id,
+                current_phase,
+                code,
+            )
+            logger.info(
+                TurnTrace(
+                    turn_id=turn_id,
+                    tool=used_tool,
+                    timings=timings,
+                    context_chars=context_chars,
+                    truncated_chunks=truncated_chunks,
+                    degraded=True,
+                    degraded_phase=current_phase,
+                    error_code=code,
+                    status="error",
+                ).format_line()
+            )
+            return self._handle_graceful_degradation(
+                herramienta=used_tool,
+                error_code=code,
+                elapsed_seconds=total_seconds,
+                timings=timings,
+                visual_evidence=visual_evidence,
+            )
+        except Exception as exc:
+            code = type(exc).__name__
+            if generation_started_at is not None and inference_seconds == 0.0:
+                inference_seconds = max(0.0, time.perf_counter() - generation_started_at)
+            total_seconds = time.perf_counter() - start_time
+            timings = PhaseTimings(
+                routing_seconds=routing_seconds,
+                embedding_seconds=embedding_seconds,
+                retrieval_seconds=retrieval_seconds,
+                evidence_seconds=evidence_seconds,
+                prompt_seconds=prompt_seconds,
+                image_prep_seconds=image_prep_seconds,
+                vision_analysis_seconds=vision_analysis_seconds,
+                inference_seconds=inference_seconds,
+                total_seconds=total_seconds,
+            )
+            logger.error(
+                "ORCHESTRATION_ERROR | turn_id=%s | phase=%s | error_code=%s",
+                turn_id,
+                current_phase,
+                code,
+            )
+            logger.info(
+                TurnTrace(
+                    turn_id=turn_id,
+                    tool=used_tool,
+                    timings=timings,
+                    context_chars=context_chars,
+                    truncated_chunks=truncated_chunks,
+                    degraded=True,
+                    degraded_phase=current_phase,
+                    error_code=code,
+                    status="error",
+                ).format_line()
+            )
+            return self._handle_graceful_degradation(
+                herramienta=used_tool,
+                error_code=code,
                 elapsed_seconds=total_seconds,
                 timings=timings,
                 visual_evidence=visual_evidence,
             )
 
-        except DomainBaseError as e:
-            logger.exception(f"Error en orquestacion: {e!s}")
-            return self._handle_graceful_degradation(
-                payload.user_input, "orquestador", str(e), time.perf_counter() - start_time
-            )
-        except Exception as e:
-            logger.exception(f"Error inesperado en orquestacion: {e!s}")
-            return self._handle_graceful_degradation(
-                payload.user_input, "orquestador", str(e), time.perf_counter() - start_time
-            )
+    @staticmethod
+    def _split_generation(
+        generation_wall: float, metrics: LLMCallMetrics | None
+    ) -> tuple[float, float, LLMCallMetrics]:
+        if metrics is None:
+            return 0.0, generation_wall, LLMCallMetrics(operation="generate")
+        image_prep = max(0.0, metrics.image_prep_seconds)
+        queue_wait = max(0.0, metrics.queue_wait_seconds)
+        inference = max(0.0, generation_wall - image_prep - queue_wait)
+        return image_prep, inference, metrics
 
     def _collect_visual_evidence(
         self, chunks: Sequence[ManualChunk]
@@ -181,14 +363,19 @@ class OrchestrateAgentUseCase:
         Both dedicated visual chunks and text fragments that reference the
         figures on their page are considered, because top-k retrieval often
         ranks the surrounding prose above the image chunk. Assets are
-        deduplicated by resolved path and capped to keep the chat compact.
+        deduplicated by content hash when available and capped to the
+        configured multimodal budget.
         """
         assets_dir = self._settings.extracted_images_dir.resolve()
+        limit = self._settings.vision_max_images_per_turn
         evidence: list[VisualEvidenceDTO] = []
-        seen: set[str] = set()
+        seen_paths: set[str] = set()
+        seen_hashes: set[str] = set()
 
         for chunk in chunks:
-            for raw_path in self._chunk_image_paths(chunk):
+            originals = self._chunk_image_paths(chunk)
+            thumbnails = self._chunk_thumb_paths(chunk)
+            for index, raw_path in enumerate(originals):
                 resolved = self._resolve_asset_path(raw_path, assets_dir)
                 if resolved is None:
                     logger.warning(
@@ -197,13 +384,22 @@ class OrchestrateAgentUseCase:
                     )
                     continue
 
-                key = str(resolved)
-                if key in seen:
+                resolved_key = str(resolved)
+                digest = chunk.metadata.get("image_sha256")
+                digest_key = str(digest) if digest else ""
+                if resolved_key in seen_paths or (digest_key and digest_key in seen_hashes):
                     continue
-                seen.add(key)
+                seen_paths.add(resolved_key)
+                if digest_key:
+                    seen_hashes.add(digest_key)
+
+                thumbnail_raw = thumbnails[index] if index < len(thumbnails) else ""
+                thumbnail = (
+                    self._resolve_asset_path(thumbnail_raw, assets_dir) if thumbnail_raw else None
+                )
                 evidence.append(
                     VisualEvidenceDTO(
-                        image_path=key,
+                        image_path=str(resolved),
                         image_title=str(chunk.metadata.get("image_title") or ""),
                         document_title=str(
                             chunk.metadata.get("document_title")
@@ -211,9 +407,11 @@ class OrchestrateAgentUseCase:
                             or ""
                         ),
                         page=chunk.page,
+                        thumbnail_path=str(thumbnail or resolved),
+                        original_path=str(resolved),
                     )
                 )
-                if len(evidence) >= MAX_VISUAL_EVIDENCE:
+                if len(evidence) >= limit:
                     return tuple(evidence)
 
         return tuple(evidence)
@@ -229,6 +427,16 @@ class OrchestrateAgentUseCase:
         return []
 
     @staticmethod
+    def _chunk_thumb_paths(chunk: ManualChunk) -> list[str]:
+        single = chunk.metadata.get("thumb_path")
+        if isinstance(single, str) and single.strip():
+            return [single.strip()]
+        multiple = chunk.metadata.get("thumb_paths")
+        if isinstance(multiple, str):
+            return [path.strip() for path in multiple.split("|") if path.strip()]
+        return []
+
+    @staticmethod
     def _resolve_asset_path(raw_path: str, assets_dir: Path) -> Path | None:
         candidate = Path(raw_path)
         for path in (candidate, assets_dir / candidate.name):
@@ -236,20 +444,29 @@ class OrchestrateAgentUseCase:
                 continue
             try:
                 resolved = path.resolve()
-            except OSError as exc:
-                logger.warning("VISUAL_EVIDENCE | path=%s | action=skipped | error=%s", path, exc)
+            except OSError:
                 continue
             if resolved.is_file() and resolved.is_relative_to(assets_dir):
                 return resolved
         return None
 
     def _handle_graceful_degradation(
-        self, query: str, herramienta: str, motivo_error: str, elapsed_seconds: float = 0.0
+        self,
+        *,
+        herramienta: str,
+        error_code: str,
+        elapsed_seconds: float,
+        timings: PhaseTimings,
+        visual_evidence: tuple[VisualEvidenceDTO, ...],
     ) -> OutboundResponseDTO:
         return OutboundResponseDTO(
-            response_text=f"Aviso del sistema: {motivo_error}",
+            response_text=(
+                f"Aviso del sistema: no se pudo completar el turno (codigo: {error_code})."
+            ),
             is_degraded=True,
             used_tool=herramienta,
-            error_log=motivo_error,
+            error_log=error_code,
             elapsed_seconds=elapsed_seconds,
+            timings=timings,
+            visual_evidence=visual_evidence,
         )

@@ -6,6 +6,7 @@ import pytest
 
 from src.application.dtos.agent_dtos import InboundPayloadDTO
 from src.application.use_cases.orchestrate_agent import OrchestrateAgentUseCase
+from src.domain.exceptions.core_errors import LLMInferenceError
 from src.domain.models.agent import OrchestratorDecision
 from src.domain.models.document import ManualChunk
 from src.domain.models.embedding import EmbeddingVector
@@ -266,3 +267,106 @@ def test_prompt_context_is_clipped_per_chunk_and_keeps_source_metadata(
     assert "max_chars_per_chunk=200" in metrics
     assert "truncated=1" in metrics
     assert "relleno relleno relleno" not in caplog.text
+
+
+class FailingRouterLLM(StubLLM):
+    def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision:
+        raise LLMInferenceError("router down with sensitive detail")
+
+
+class FailingGenerateLLM(StubLLM):
+    def generate_response(self, context: Sequence[str], user_input: str) -> str:
+        raise LLMInferenceError("generation boom with sensitive detail")
+
+
+def test_router_failure_fails_open_to_deterministic_search(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    llm = FailingRouterLLM()
+    use_case = _use_case(settings, [_text_chunk("")], llm=llm)
+
+    caplog.set_level(logging.INFO)
+    result = use_case.execute(InboundPayloadDTO(user_input="explica el proceso"))
+
+    assert result.used_tool == "buscar_manual"
+    assert result.is_degraded is True
+    assert result.error_log == "LLMInferenceError"
+    assert result.timings is not None
+    assert result.timings.total_seconds >= result.timings.routing_seconds
+    assert llm.last_context
+    assert "ROUTER_FALLBACK" in caplog.text
+    assert "TURN_TRACE" in caplog.text
+    assert "sensitive detail" not in caplog.text
+
+
+def test_generation_failure_returns_partial_timings_and_sanitized_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    use_case = _use_case(settings, [_text_chunk("")], llm=FailingGenerateLLM())
+
+    caplog.set_level(logging.INFO)
+    result = use_case.execute(InboundPayloadDTO(user_input="explica el proceso"))
+
+    assert result.is_degraded is True
+    assert result.timings is not None
+    assert result.timings.total_seconds > 0
+    assert result.error_log == "LLMInferenceError"
+    assert "sensitive detail" not in result.response_text
+    assert "sensitive detail" not in caplog.text
+    assert "ORCHESTRATION_ERROR" in caplog.text
+
+
+def test_turn_trace_never_logs_query_or_document_content(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    secret_query = "CONSULTA_SECRETA_DEL_OPERARIO"
+    secret_document = "CONTENIDO_DOCUMENTAL_CONFIDENCIAL"
+    chunk = ManualChunk(
+        chunk_id=ChunkId("secret-1"),
+        content=secret_document,
+        page=1,
+        metadata={"source": "manual.pdf", "page_number": 1},
+    )
+    use_case = _use_case(settings, [chunk])
+
+    caplog.set_level(logging.DEBUG)
+    result = use_case.execute(InboundPayloadDTO(user_input=secret_query))
+
+    assert result.response_text
+    assert secret_query not in caplog.text
+    assert secret_document not in caplog.text
+    assert "TURN_TRACE" in caplog.text
+
+
+def test_visual_evidence_exposes_thumbnail_and_original_paths(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    original = settings.extracted_images_dir / "diagram.png"
+    thumbnail = settings.extracted_images_dir / "diagram_t.jpg"
+    original.write_bytes(b"png")
+    thumbnail.write_bytes(b"jpg")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-thumb"),
+        content="[IMAGEN] Diagrama",
+        page=3,
+        is_visual=True,
+        metadata={
+            "image_path": str(original),
+            "thumb_path": str(thumbnail),
+            "image_sha256": "abc123",
+            "image_title": "Diagrama",
+            "document_title": "Manual",
+            "page_number": 3,
+        },
+    )
+    use_case = _use_case(settings, [chunk])
+
+    result = use_case.execute(InboundPayloadDTO(user_input="muestrame el diagrama"))
+
+    assert len(result.visual_evidence) == 1
+    evidence = result.visual_evidence[0]
+    assert evidence.display_path == str(thumbnail.resolve())
+    assert evidence.original_path == str(original.resolve())

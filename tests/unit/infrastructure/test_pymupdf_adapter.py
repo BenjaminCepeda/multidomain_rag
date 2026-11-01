@@ -1,6 +1,8 @@
+import io
 from pathlib import Path
 
 import fitz
+from PIL import Image
 
 from src.domain.services.file_fingerprint import compute_file_sha256
 from src.infrastructure.adapters.pymupdf_adapter import PyMuPDFAdapter
@@ -152,3 +154,53 @@ def test_text_chunks_carry_the_source_file_hash(tmp_path: Path) -> None:
     assert all(
         chunk.metadata["file_hash"] == compute_file_sha256(pdf_path) for chunk in text_chunks
     )
+
+
+def test_ingestion_generates_vision_derivative_and_thumbnail(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "EdgeAI_manual.pdf"
+    _make_pdf(pdf_path, "EdgeAI manual")
+    settings = _settings(tmp_path)
+
+    chunks = PyMuPDFAdapter(settings).extract_chunks(str(pdf_path))
+    visuals = [chunk for chunk in chunks if chunk.is_visual]
+
+    assert len(visuals) == 1
+    metadata = visuals[0].metadata
+    assert "vision_path" in metadata
+    assert "thumb_path" in metadata
+    assert "image_sha256" in metadata
+
+    vision_path = Path(str(metadata["vision_path"]))
+    thumb_path = Path(str(metadata["thumb_path"]))
+    assert vision_path.is_file()
+    assert thumb_path.is_file()
+    assert vision_path.is_relative_to(settings.extracted_images_dir.resolve())
+    assert thumb_path.is_relative_to(settings.extracted_images_dir.resolve())
+    assert int(metadata["vision_bytes"]) <= settings.vision_max_bytes_per_image
+    assert max(int(metadata["vision_width"]), int(metadata["vision_height"])) <= (
+        settings.vision_max_long_edge_px
+    )
+    with Image.open(thumb_path) as thumb:
+        assert max(thumb.size) <= settings.vision_thumbnail_long_edge_px
+
+
+def test_large_photo_derivative_is_downscaled_and_bounded(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    adapter = PyMuPDFAdapter(settings)
+    buffer = io.BytesIO()
+    Image.new("RGB", (3200, 2000), (30, 120, 200)).save(buffer, format="JPEG", quality=95)
+
+    derivative = adapter._build_derivatives(
+        buffer.getvalue(), "jpg", settings.extracted_images_dir, "abc", 1, 0
+    )
+
+    assert derivative is not None
+    assert derivative.vision_format == "jpg"
+    assert max(derivative.vision_width, derivative.vision_height) <= (
+        settings.vision_max_long_edge_px
+    )
+    assert derivative.vision_bytes <= settings.vision_max_bytes_per_image
+    assert Path(derivative.vision_path).is_file()
+    with Image.open(derivative.thumb_path) as thumb:
+        assert max(thumb.size) <= settings.vision_thumbnail_long_edge_px

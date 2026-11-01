@@ -10,7 +10,9 @@ from src.domain.exceptions.core_errors import LLMInferenceError
 from src.infrastructure.adapters.local_llm_adapter import (
     MAX_IMAGES_PER_REQUEST,
     LocalLLMAdapter,
+    _CircuitBreaker,
 )
+from src.infrastructure.config.settings import Settings
 
 
 class _FakeResponse:
@@ -27,13 +29,11 @@ class _FakeResponse:
 
 
 def _adapter() -> LocalLLMAdapter:
-    adapter = LocalLLMAdapter(
+    return LocalLLMAdapter(
         endpoint="http://llm.test/v1",
         model_chat="test-model",
         timeout=5,
     )
-    adapter.check_health = lambda: True  # type: ignore[method-assign]
-    return adapter
 
 
 def _capture_payload(monkeypatch: pytest.MonkeyPatch, adapter: LocalLLMAdapter) -> dict[str, Any]:
@@ -189,3 +189,150 @@ def test_non_multimodal_http_error_is_not_retried(
         adapter.generate_response(_context_with_images([image]), "pregunta")
 
     assert len(calls) == 1
+
+
+def test_router_is_bounded_and_disables_long_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse(content='{"herramienta": "buscar_manual"}')
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    decision = adapter.get_orchestrator_decision("consulta tecnica", False)
+
+    assert decision.herramienta == "buscar_manual"
+    payload = captured["json"]
+    assert payload["max_tokens"] <= 48
+    assert payload["chat_template_kwargs"]["enable_thinking"] is False
+    assert captured["timeout"] == (1.5, 6.0)
+
+
+def test_router_error_never_leaks_model_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    sentinel = "CONTENIDO_SENSIBLE_DEL_MODELO"
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(content=sentinel)
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    with pytest.raises(LLMInferenceError) as exc_info:
+        adapter.get_orchestrator_decision("consulta", False)
+
+    assert sentinel not in str(exc_info.value)
+
+
+def test_router_circuit_breaker_opens_after_consecutive_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    adapter._router_breaker = _CircuitBreaker(failure_threshold=1, recovery_seconds=60)
+    calls: list[int] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(1)
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    with pytest.raises(LLMInferenceError):
+        adapter.get_orchestrator_decision("consulta", False)
+    with pytest.raises(LLMInferenceError):
+        adapter.get_orchestrator_decision("consulta", False)
+
+    assert len(calls) == 1
+
+
+def test_health_check_uses_cached_state_between_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    calls: list[int] = []
+
+    class _Session:
+        @staticmethod
+        def get(url: str, timeout: int) -> _FakeResponse:
+            calls.append(1)
+            return _FakeResponse(status_code=200)
+
+    monkeypatch.setattr(adapter, "_session", _Session())
+
+    assert adapter.check_health() is True
+    assert adapter.check_health() is True
+    assert len(calls) == 1
+    assert adapter.check_health(force=True) is True
+    assert len(calls) == 2
+
+
+def test_images_outside_the_allowed_root_are_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        data_files_path=str(tmp_path / "data"),
+        extracted_images_path="extracted_images",
+    )
+    settings.extracted_images_dir.mkdir(parents=True)
+    inside = settings.extracted_images_dir / "ok.png"
+    inside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    adapter = LocalLLMAdapter(settings=settings, timeout=5)
+    captured = _capture_payload(monkeypatch, adapter)
+
+    adapter.generate_response(_context_with_images([inside, outside]), "pregunta")
+
+    content = captured["payload"]["messages"][1]["content"]
+    image_parts = [part for part in content if part["type"] == "image_url"]
+    assert len(image_parts) == 1
+
+
+def test_total_payload_budget_drops_images_and_reports_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _adapter()
+    adapter._max_total_payload_bytes = 5_000
+    adapter._max_images = 3
+    first = tmp_path / "large_a.png"
+    second = tmp_path / "large_b.png"
+    first.write_bytes(b"x" * 1_500)
+    second.write_bytes(b"x" * 1_500)
+    captured = _capture_payload(monkeypatch, adapter)
+
+    adapter.generate_response(_context_with_images([first, second]), "pregunta")
+
+    content = captured["payload"]["messages"][1]["content"]
+    image_parts = [part for part in content if part["type"] == "image_url"]
+    metrics = adapter.consume_call_metrics()
+    assert len(image_parts) == 1
+    assert metrics is not None
+    assert metrics.operation == "generate"
+    assert metrics.images_attached == 1
+    assert metrics.images_skipped >= 1
+    assert metrics.payload_bytes <= 5_000
+
+
+def test_analyze_image_uses_detected_mime_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "diagram.bmp"
+    image.write_bytes(b"BM" + b"0" * 64)
+    adapter = _adapter()
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse(content="diagrama")
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    assert adapter.analyze_image(str(image)) == "diagrama"
+    url = captured["json"]["messages"][0]["content"][1]["image_url"]["url"]
+    assert url.startswith("data:image/bmp;base64,")

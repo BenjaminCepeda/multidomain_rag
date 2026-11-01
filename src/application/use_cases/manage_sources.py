@@ -84,29 +84,37 @@ class ManageSourcesUseCase:
     def _unlink_file(path: Path, event: str) -> None:
         try:
             if not path.exists():
-                logger.warning("%s | resource=%s | action=skipped | reason=not_found", event, path)
+                logger.warning(
+                    "%s | resource=%s | action=skipped | reason=not_found", event, path.name
+                )
                 return
             if not path.is_file():
-                logger.warning("%s | resource=%s | action=skipped | reason=not_a_file", event, path)
+                logger.warning(
+                    "%s | resource=%s | action=skipped | reason=not_a_file", event, path.name
+                )
                 return
             path.unlink()
-            logger.info("%s | resource=%s | action=deleted", event, path)
+            logger.info("%s | resource=%s | action=deleted", event, path.name)
         except OSError as exc:
-            logger.warning("%s | resource=%s | action=failed | error=%s", event, path, exc)
+            logger.warning(
+                "%s | resource=%s | action=failed | error_type=%s",
+                event,
+                path.name,
+                type(exc).__name__,
+            )
 
     def _purge_extracted_images(self) -> None:
         images_dir = self._settings.extracted_images_dir
         if not images_dir.is_dir():
-            logger.warning(
-                "EXTRACTED_IMAGES_PURGE | dir=%s | action=skipped | reason=not_found", images_dir
-            )
+            logger.warning("EXTRACTED_IMAGES_PURGE | action=skipped | reason=not_found")
             return
 
         try:
             entries = list(images_dir.iterdir())
         except OSError as exc:
             logger.warning(
-                "EXTRACTED_IMAGES_PURGE | dir=%s | action=failed | error=%s", images_dir, exc
+                "EXTRACTED_IMAGES_PURGE | action=failed | error_type=%s",
+                type(exc).__name__,
             )
             return
 
@@ -118,14 +126,15 @@ class ManageSourcesUseCase:
                 else:
                     entry.unlink()
                 deleted += 1
-                logger.info("EXTRACTED_IMAGES_PURGE | resource=%s | action=deleted", entry)
+                logger.info("EXTRACTED_IMAGES_PURGE | resource=%s | action=deleted", entry.name)
             except OSError as exc:
                 logger.warning(
-                    "EXTRACTED_IMAGES_PURGE | resource=%s | action=failed | error=%s", entry, exc
+                    "EXTRACTED_IMAGES_PURGE | resource=%s | action=failed | error_type=%s",
+                    entry.name,
+                    type(exc).__name__,
                 )
 
         logger.info(
-            "EXTRACTED_IMAGES_PURGE | dir=%s | action=completed | deleted=%d",
-            images_dir,
+            "EXTRACTED_IMAGES_PURGE | action=completed | deleted=%d",
             deleted,
         )

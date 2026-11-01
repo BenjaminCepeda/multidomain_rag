@@ -21,6 +21,13 @@ class VisualEvidenceDTO:
     image_title: str
     document_title: str
     page: int
+    thumbnail_path: str | None = None
+    original_path: str | None = None
+
+    @property
+    def display_path(self) -> str:
+        """Small asset used in the chat history; the original stays on demand."""
+        return self.thumbnail_path or self.image_path
 
     @property
     def caption(self) -> str:
@@ -40,3 +47,4 @@ class OutboundResponseDTO:
     elapsed_seconds: float = 0.0
     timings: PhaseTimings | None = None
     visual_evidence: tuple[VisualEvidenceDTO, ...] = ()
+    turn_id: str | None = None

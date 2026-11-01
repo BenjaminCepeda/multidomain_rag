@@ -2,6 +2,7 @@
 """PyMuPDF extraction adapter with semantic context enrichment for visual assets."""
 
 import hashlib
+import io
 import logging
 import os
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import NamedTuple, cast
 
 import fitz  # PyMuPDF
+from PIL import Image, ImageOps
 
 from src.domain.exceptions.core_errors import DataIncompleteError
 from src.domain.models.document import ManualChunk
@@ -32,6 +34,7 @@ MAX_VISUAL_EMBEDDING_CHARS = 400
 MAX_VISUAL_EMBEDDING_TITLE_CHARS = 100
 MAX_VISUAL_EMBEDDING_DOCUMENT_CHARS = 80
 MAX_VISUAL_EMBEDDING_THEME_CHARS = 90
+VISION_TRANSFORM_VERSION = 1
 
 type BlockInfo = tuple[float, float, float, float, str, int, int]
 
@@ -43,6 +46,30 @@ class ExtractedImage(NamedTuple):
     title: str
     top: float | None
     bottom: float | None
+    vision_path: str = ""
+    thumb_path: str = ""
+    vision_format: str = ""
+    vision_bytes: int = 0
+    vision_width: int = 0
+    vision_height: int = 0
+    image_sha256: str = ""
+    vision_sha256: str = ""
+    original_width: int = 0
+    original_height: int = 0
+
+
+class VisualDerivative(NamedTuple):
+    """Optimized vision asset and thumbnail generated during ingestion."""
+
+    vision_path: str
+    thumb_path: str
+    vision_format: str
+    vision_bytes: int
+    vision_width: int
+    vision_height: int
+    vision_sha256: str
+    original_width: int
+    original_height: int
 
 
 _TOKEN_PATTERN = re.compile(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{4,}")
@@ -323,21 +350,17 @@ class PyMuPDFAdapter(IDocumentExtractor):
 
     def extract_chunks(self, file_path: str, file_hash: str | None = None) -> list[ManualChunk]:
         if not os.path.exists(file_path):
-            raise DataIncompleteError(f"El extractor fisico no encontro el archivo en: {file_path}")
+            raise DataIncompleteError("El extractor fisico no encontro el archivo solicitado.")
 
         try:
             resolved_hash = file_hash or compute_file_sha256(file_path)
         except OSError as exc:
-            raise DataIncompleteError(
-                f"No se pudo calcular la huella del archivo: {file_path}", exc
-            ) from exc
+            raise DataIncompleteError("No se pudo calcular la huella del archivo.", exc) from exc
 
         try:
             doc = fitz.open(file_path)
         except Exception as exc:
-            raise DataIncompleteError(
-                f"El motor PyMuPDF no pudo abrir el archivo: {file_path}", exc
-            ) from exc
+            raise DataIncompleteError("El motor PyMuPDF no pudo abrir el archivo.", exc) from exc
 
         try:
             return self._extract_document(doc, file_path, resolved_hash)
@@ -345,7 +368,7 @@ class PyMuPDFAdapter(IDocumentExtractor):
             raise
         except Exception as exc:
             raise DataIncompleteError(
-                f"El motor PyMuPDF colapso al leer la estructura binaria de: {file_path}", exc
+                "El motor PyMuPDF colapso al leer la estructura binaria.", exc
             ) from exc
         finally:
             doc.close()
@@ -407,6 +430,16 @@ class PyMuPDFAdapter(IDocumentExtractor):
                     }
                     if images:
                         metadata["image_paths"] = "|".join(image.path for image in images)
+                        vision_paths = "|".join(
+                            image.vision_path for image in images if image.vision_path
+                        )
+                        if vision_paths:
+                            metadata["vision_paths"] = vision_paths
+                        thumb_paths = "|".join(
+                            image.thumb_path for image in images if image.thumb_path
+                        )
+                        if thumb_paths:
+                            metadata["thumb_paths"] = thumb_paths
                     chunks.append(
                         ManualChunk(
                             chunk_id=ChunkId.build(
@@ -494,7 +527,11 @@ class PyMuPDFAdapter(IDocumentExtractor):
         try:
             image_list = page.get_images(full=True)
         except Exception as exc:
-            logger.warning("PDF_IMAGES | page=%d | action=skipped | error=%s", page_number, exc)
+            logger.warning(
+                "PDF_IMAGES | page=%d | action=skipped | error_type=%s",
+                page_number,
+                type(exc).__name__,
+            )
             return images
 
         for img_index, img in enumerate(image_list):
@@ -507,6 +544,16 @@ class PyMuPDFAdapter(IDocumentExtractor):
                 image_name = f"{doc_hash}_p{page_number}_i{img_index}.{extension}"
                 image_path = images_dir / image_name
                 image_path.write_bytes(image_bytes)
+                image_sha256 = hashlib.sha256(image_bytes).hexdigest()
+
+                derivative = self._build_derivatives(
+                    image_bytes,
+                    extension,
+                    images_dir,
+                    doc_hash,
+                    page_number,
+                    img_index,
+                )
 
                 top, bottom = self._image_bounds(page, xref)
                 title = (
@@ -514,23 +561,192 @@ class PyMuPDFAdapter(IDocumentExtractor):
                     if top is not None and bottom is not None
                     else ""
                 )
-                images.append(
-                    ExtractedImage(
-                        path=str(image_path.resolve()),
-                        title=title,
-                        top=top,
-                        bottom=bottom,
-                    )
+                extracted = ExtractedImage(
+                    path=str(image_path.resolve()),
+                    title=title,
+                    top=top,
+                    bottom=bottom,
+                    image_sha256=image_sha256,
                 )
+                if derivative is not None:
+                    extracted = extracted._replace(
+                        vision_path=derivative.vision_path,
+                        thumb_path=derivative.thumb_path,
+                        vision_format=derivative.vision_format,
+                        vision_bytes=derivative.vision_bytes,
+                        vision_width=derivative.vision_width,
+                        vision_height=derivative.vision_height,
+                        vision_sha256=derivative.vision_sha256,
+                        original_width=derivative.original_width,
+                        original_height=derivative.original_height,
+                    )
+                images.append(extracted)
             except Exception as exc:
                 logger.warning(
-                    "PDF_IMAGES | page=%d | image=%d | action=skipped | error=%s",
+                    "PDF_IMAGES | page=%d | image=%d | action=skipped | error_type=%s",
                     page_number,
                     img_index,
-                    exc,
+                    type(exc).__name__,
                 )
                 continue
         return images
+
+    def _build_derivatives(
+        self,
+        image_bytes: bytes,
+        extension: str,
+        images_dir: Path,
+        doc_hash: str,
+        page_number: int,
+        image_index: int,
+    ) -> VisualDerivative | None:
+        """Generate a bounded vision asset and a UI thumbnail during ingestion.
+
+        The original stays untouched for the interface. The LLM receives a
+        normalized derivative whose long edge and encoded size are bounded by
+        settings, which keeps Base64 payloads and visual prefill predictable.
+        """
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                source.load()
+                original_width, original_height = source.size
+                original_mode = source.mode
+                has_alpha = original_mode in {"RGBA", "LA"} or (
+                    original_mode == "P" and "transparency" in source.info
+                )
+                prepared = ImageOps.exif_transpose(source)
+
+            prepared = self._flatten_alpha(prepared, has_alpha)
+            use_png = self._should_use_png(extension, original_mode, has_alpha, prepared)
+            vision_data, vision_format, vision_width, vision_height = self._encode_vision(
+                prepared, use_png
+            )
+
+            vision_name = (
+                f"{doc_hash}_p{page_number}_i{image_index}"
+                f"_v{VISION_TRANSFORM_VERSION}.{vision_format}"
+            )
+            vision_path = images_dir / vision_name
+            vision_path.write_bytes(vision_data)
+
+            thumb_data = self._encode_thumbnail(prepared)
+            thumb_name = f"{doc_hash}_p{page_number}_i{image_index}_t.jpg"
+            thumb_path = images_dir / thumb_name
+            thumb_path.write_bytes(thumb_data)
+
+            return VisualDerivative(
+                vision_path=str(vision_path.resolve()),
+                thumb_path=str(thumb_path.resolve()),
+                vision_format=vision_format,
+                vision_bytes=len(vision_data),
+                vision_width=vision_width,
+                vision_height=vision_height,
+                vision_sha256=hashlib.sha256(vision_data).hexdigest(),
+                original_width=int(original_width),
+                original_height=int(original_height),
+            )
+        except Exception as exc:
+            logger.warning(
+                "PDF_IMAGES | page=%d | image=%d | action=derivative_skipped | error_type=%s",
+                page_number,
+                image_index,
+                type(exc).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _flatten_alpha(image: Image.Image, has_alpha: bool) -> Image.Image:
+        if not has_alpha:
+            return image.convert("RGB")
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        return Image.alpha_composite(background, rgba).convert("RGB")
+
+    @staticmethod
+    def _should_use_png(
+        extension: str,
+        original_mode: str,
+        has_alpha: bool,
+        image: Image.Image,
+    ) -> bool:
+        """Prefer lossless output for line art and JPEG for photographic content."""
+        if extension.lower() in {"jpg", "jpeg"}:
+            return False
+        if has_alpha or original_mode in {"1", "P", "L"}:
+            return True
+        try:
+            sample = image.copy()
+            sample.thumbnail((512, 512), Image.Resampling.BILINEAR)
+            colors = sample.getcolors(maxcolors=2048)
+            return colors is not None
+        except Exception:
+            return False
+
+    def _encode_vision(self, image: Image.Image, use_png: bool) -> tuple[bytes, str, int, int]:
+        """Resize and encode the derivative, tightening it until it fits budget."""
+        max_edge = self._settings.vision_max_long_edge_px
+        max_bytes = self._settings.vision_max_bytes_per_image
+        quality = self._settings.vision_jpeg_quality
+
+        edge = max_edge
+        data = b""
+        output_format = "png" if use_png else "jpg"
+        width, height = image.size
+        while True:
+            candidate = self._resize_long_edge(image, edge)
+            width, height = candidate.size
+            buffer = io.BytesIO()
+            if use_png:
+                candidate.save(buffer, format="PNG", optimize=True)
+            else:
+                candidate.save(
+                    buffer,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                    progressive=True,
+                )
+            data = buffer.getvalue()
+            if len(data) <= max_bytes or edge <= 960:
+                break
+            edge = max(960, edge // 2)
+
+        if len(data) > max_bytes and use_png:
+            # A detailed scan can stay large even after resizing; fall back to
+            # lossy but bounded JPEG rather than shipping an oversized payload.
+            buffer = io.BytesIO()
+            self._resize_long_edge(image, edge).save(
+                buffer,
+                format="JPEG",
+                quality=quality,
+                optimize=True,
+                progressive=True,
+            )
+            data = buffer.getvalue()
+            output_format = "jpg"
+
+        return data, output_format, int(width), int(height)
+
+    @staticmethod
+    def _resize_long_edge(image: Image.Image, max_edge: int) -> Image.Image:
+        if max(image.size) <= max_edge:
+            return image
+        resized = image.copy()
+        resized.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        return resized
+
+    def _encode_thumbnail(self, image: Image.Image) -> bytes:
+        thumb = image.copy()
+        thumb.thumbnail(
+            (
+                self._settings.vision_thumbnail_long_edge_px,
+                self._settings.vision_thumbnail_long_edge_px,
+            ),
+            Image.Resampling.LANCZOS,
+        )
+        buffer = io.BytesIO()
+        thumb.save(buffer, format="JPEG", quality=75, optimize=True, progressive=True)
+        return buffer.getvalue()
 
     @staticmethod
     def _load_renderable_image(doc: fitz.Document, xref: int) -> tuple[bytes, str] | None:
@@ -544,7 +760,11 @@ class PyMuPDFAdapter(IDocumentExtractor):
         try:
             pixmap = fitz.Pixmap(doc, xref)
         except Exception as exc:
-            logger.debug("PDF_IMAGES | action=pixmap_load_failed | xref=%d | error=%s", xref, exc)
+            logger.debug(
+                "PDF_IMAGES | action=pixmap_load_failed | xref=%d | error_type=%s",
+                xref,
+                type(exc).__name__,
+            )
             pixmap = None
 
         if pixmap is not None:
@@ -571,7 +791,10 @@ class PyMuPDFAdapter(IDocumentExtractor):
                 )
                 return converted.tobytes("png"), "png"
             except Exception as exc:
-                logger.warning("PDF_IMAGES | action=color_conversion_failed | error=%s", exc)
+                logger.warning(
+                    "PDF_IMAGES | action=color_conversion_failed | error_type=%s",
+                    type(exc).__name__,
+                )
 
         return PyMuPDFAdapter._extract_original_image(doc, xref)
 
@@ -580,7 +803,10 @@ class PyMuPDFAdapter(IDocumentExtractor):
         try:
             base_image = doc.extract_image(xref)
         except Exception as exc:
-            logger.warning("PDF_IMAGES | action=extract_failed | error=%s", exc)
+            logger.warning(
+                "PDF_IMAGES | action=extract_failed | error_type=%s",
+                type(exc).__name__,
+            )
             return None
 
         image_bytes = base_image.get("image")
@@ -593,7 +819,10 @@ class PyMuPDFAdapter(IDocumentExtractor):
         try:
             rects = page.get_image_rects(xref)
         except Exception as exc:
-            logger.warning("PDF_IMAGES | action=skipped_bounds | error=%s", exc)
+            logger.warning(
+                "PDF_IMAGES | action=skipped_bounds | error_type=%s",
+                type(exc).__name__,
+            )
             return None, None
         if not rects:
             return None, None
@@ -656,7 +885,22 @@ class PyMuPDFAdapter(IDocumentExtractor):
             "surrounding_text_context": surrounding,
             "image_path": image.path,
             "image_paths": image.path,
+            "image_sha256": image.image_sha256,
+            "original_width": image.original_width,
+            "original_height": image.original_height,
         }
+        if image.vision_path:
+            metadata["vision_path"] = image.vision_path
+            metadata["vision_paths"] = image.vision_path
+            metadata["vision_format"] = image.vision_format
+            metadata["vision_bytes"] = image.vision_bytes
+            metadata["vision_width"] = image.vision_width
+            metadata["vision_height"] = image.vision_height
+            metadata["vision_sha256"] = image.vision_sha256
+            metadata["vision_transform_version"] = VISION_TRANSFORM_VERSION
+        if image.thumb_path:
+            metadata["thumb_path"] = image.thumb_path
+            metadata["thumb_paths"] = image.thumb_path
 
         return ManualChunk(
             chunk_id=ChunkId.build(

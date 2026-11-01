@@ -3,10 +3,16 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 from src.domain.models.agent import OrchestratorDecision
+from src.domain.models.telemetry import LLMCallMetrics
 
 
 class ILLMEngine(ABC):
-    """Port for local LLM inference (chat + vision)."""
+    """Port for local LLM inference (chat + vision).
+
+    Implementations may expose the metrics of their most recent call through
+    ``consume_call_metrics``. The default implementation keeps simple stubs
+    and test doubles valid without forcing them to report transport details.
+    """
 
     @abstractmethod
     def get_orchestrator_decision(
@@ -21,3 +27,7 @@ class ILLMEngine(ABC):
 
     @abstractmethod
     def health_check(self) -> bool: ...
+
+    def consume_call_metrics(self) -> LLMCallMetrics | None:
+        """Return and clear the metrics of the last call made by this thread."""
+        return None

@@ -55,7 +55,10 @@ class QdrantAdapter(IVectorRepository):
 
             self._sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
         except Exception as exc:
-            logger.warning("SparseEmbeddingUnavailable | falling back to dense-only: %s", exc)
+            logger.warning(
+                "SparseEmbeddingUnavailable | falling back to dense-only | error_type=%s",
+                type(exc).__name__,
+            )
             self._sparse_model = None
 
         location = settings.qdrant_url.strip()
@@ -182,7 +185,9 @@ class QdrantAdapter(IVectorRepository):
                     f"'{self._collection_name}' ({end}/{total})."
                 )
             except Exception as exc:
-                logger.error(f"Error critico en persistencia: {exc}")
+                logger.error(
+                    "VECTOR_PERSISTENCE | action=failed | error_type=%s", type(exc).__name__
+                )
                 raise VectorStorageError("Fallo en la persistencia vectorial.", exc) from exc
 
     def search(
@@ -206,7 +211,7 @@ class QdrantAdapter(IVectorRepository):
                     limit=limit * 4,
                 )
             except Exception as exc:
-                logger.error(f"Error critico en ejecucion vectorial: {exc!s}")
+                logger.error("VECTOR_SEARCH | action=failed | error_type=%s", type(exc).__name__)
                 raise VectorStorageError(
                     "Fallo en la ejecucion de consulta vectorial.", exc
                 ) from exc
@@ -233,7 +238,10 @@ class QdrantAdapter(IVectorRepository):
                         limit=limit * 4,
                     )
             except Exception as exc:
-                logger.warning(f"Sparse search failed, falling back to dense only: {exc}")
+                logger.warning(
+                    "SPARSE_SEARCH | falling back to dense-only | error_type=%s",
+                    type(exc).__name__,
+                )
 
         scores: dict[str, float] = {}
         payloads: dict[str, dict[str, object]] = {}

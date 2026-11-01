@@ -77,9 +77,11 @@ class STTAdapter(IAudioService):
 
             logger.info("--- AUDITORIA DE VOZ ---")
             logger.info(
-                f"Idioma detectado: {info.language} (Probabilidad: {info.language_probability:.2f})"
+                "STT_TRACE | language=%s | language_probability=%.2f | text_chars=%d",
+                info.language,
+                info.language_probability,
+                len(transcription),
             )
-            logger.info(f"Texto detectado: '{transcription}'")
             logger.info("------------------------")
 
             if len(transcription) < 3:
@@ -88,5 +90,5 @@ class STTAdapter(IAudioService):
 
             return transcription
         except Exception as e:
-            logger.error(f"Error tecnico durante la transcripcion: {e}")
+            logger.error("STT_TRACE error | error_type=%s", type(e).__name__)
             raise HardwareDegradationError("Fallo en la transcripcion de audio.", e) from e

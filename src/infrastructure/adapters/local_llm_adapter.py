@@ -26,8 +26,29 @@ logger = logging.getLogger(__name__)
 
 MAX_IMAGES_PER_REQUEST = 3
 MULTIMODAL_REJECTED_STATUSES = frozenset({400, 422})
+TEXT_ONLY_RETRY_STATUSES = frozenset({400, 422})
+TEXT_ONLY_RETRY_DELAY_SECONDS = 0.75
 ROUTER_ALLOWED_TOOLS = frozenset({"buscar_manual", "analizar_imagen", "responder_directo"})
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
+
+_ROUTER_RESPONSE_FORMAT: dict[str, object] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "tool_decision",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "herramienta": {
+                    "type": "string",
+                    "enum": ["buscar_manual", "analizar_imagen", "responder_directo"],
+                }
+            },
+            "required": ["herramienta"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 _IMAGE_MIME_TYPES = {
     "jpg": "image/jpeg",
@@ -39,11 +60,15 @@ _IMAGE_MIME_TYPES = {
 }
 
 _ROUTER_SYSTEM_PROMPT = (
-    "Eres un clasificador de herramientas. Responde SOLO con un objeto JSON, sin explicaciones, "
-    'con la forma {"herramienta": "buscar_manual" | "analizar_imagen" | "responder_directo"}. '
-    "Usa buscar_manual para preguntas tecnicas sobre los manuales. "
+    "Eres un clasificador de herramientas para un motor RAG de manuales tecnicos. "
+    'Responde SOLO con un objeto JSON con la forma {"herramienta": "buscar_manual" | '
+    '"analizar_imagen" | "responder_directo"}, sin explicaciones. '
+    "Usa buscar_manual para CUALQUIER pregunta tecnica, conceptual o de procedimiento "
+    "que pueda responderse con los manuales: definiciones, funcionamiento, pasos, "
+    "configuracion o causas. "
     "Usa analizar_imagen solo si la pregunta depende de la imagen adjunta. "
-    "Usa responder_directo solo para saludos o conversacion sin contenido tecnico."
+    "Usa responder_directo SOLO para saludos, despedidas, agradecimientos o charla "
+    "sin contenido tecnico."
 )
 
 
@@ -90,6 +115,47 @@ def _build_user_text(context_str: str, user_input: str, include_images: bool) ->
         "Si existe informacion relacionada, genera una respuesta completa y "
         "accionable con referencias [Archivo, Pag]."
     )
+
+
+def _with_no_think(prompt: str, model: str) -> str:
+    """Append the Qwen3 no-think hint when the server ignores the flag.
+
+    ``chat_template_kwargs`` is not honoured by every LM Studio build, but the
+    ``/no_think`` marker in the prompt is. Other model families receive the
+    prompt unchanged.
+    """
+    if "qwen3" in model.lower():
+        return f"{prompt}\n/no_think"
+    return prompt
+
+
+def _server_error_code(response: requests.Response | None) -> str:
+    """Map a server error body to a fixed, Zero-Log-safe diagnostic code.
+
+    LM Studio reports validation problems as plain error strings. Only known
+    markers are translated; the raw body is never logged because a proxy could
+    echo prompt content back to the client.
+    """
+    if response is None:
+        return "unknown"
+    try:
+        body = response.text[:2048].lower()
+    except Exception:
+        return "unknown"
+    markers = (
+        ("response_format", "invalid_response_format"),
+        ("context length", "context_length_exceeded"),
+        ("too long", "context_length_exceeded"),
+        ("not found", "model_not_found"),
+        ("loading", "model_loading"),
+        ("busy", "model_busy"),
+        ("out of memory", "out_of_memory"),
+        ("overload", "overloaded"),
+    )
+    for marker, code in markers:
+        if marker in body:
+            return code
+    return "unsupported_request"
 
 
 class _CircuitBreaker:
@@ -286,6 +352,10 @@ class LocalLLMAdapter(ILLMEngine):
         return self.check_health(force=True)
 
     # --- Router --------------------------------------------------------
+    def _router_prompt(self) -> str:
+        """Return the classification prompt with an explicit no-think hint."""
+        return _with_no_think(_ROUTER_SYSTEM_PROMPT, self._model_chat)
+
     def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision:
         started = time.perf_counter()
         queue_wait = 0.0
@@ -306,7 +376,7 @@ class LocalLLMAdapter(ILLMEngine):
             payload: dict[str, object] = {
                 "model": self._model_chat,
                 "messages": [
-                    {"role": "system", "content": _ROUTER_SYSTEM_PROMPT},
+                    {"role": "system", "content": self._router_prompt()},
                     {
                         "role": "user",
                         "content": (
@@ -317,7 +387,9 @@ class LocalLLMAdapter(ILLMEngine):
                 ],
                 "temperature": 0.0,
                 "max_tokens": self._router_max_tokens,
-                "response_format": {"type": "json_object"},
+                # LM Studio accepts json_schema; json_object is rejected with
+                # HTTP 400 by current releases.
+                "response_format": _ROUTER_RESPONSE_FORMAT,
                 # Qwen-family servers honour this flag to skip long reasoning.
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -344,6 +416,14 @@ class LocalLLMAdapter(ILLMEngine):
                 ) from exc
             except requests.exceptions.HTTPError as exc:
                 status = "http_error"
+                response_obj = exc.response
+                status_code = response_obj.status_code if response_obj is not None else None
+                logger.error(
+                    "LLM_TRACE REQUEST_ERROR | stage=router | status=%s | reason=http_error "
+                    "| server_error=%s",
+                    status_code,
+                    _server_error_code(response_obj),
+                )
                 self._router_breaker.record_failure()
                 raise LLMInferenceError(
                     "El enrutador del LLM local rechazo la peticion.", exc
@@ -536,7 +616,11 @@ class LocalLLMAdapter(ILLMEngine):
 
     # --- Generation ----------------------------------------------------
     def _build_chat_payload(
-        self, user_content: list[dict[str, object]] | str, model: str
+        self,
+        user_content: list[dict[str, object]] | str,
+        model: str,
+        *,
+        no_think: bool = False,
     ) -> dict[str, object]:
         system_prompt = (
             "Eres un asistente tecnico experto para manuales de impresoras Epson. "
@@ -556,6 +640,8 @@ class LocalLLMAdapter(ILLMEngine):
             "'No dispongo de informacion en los manuales'.\n"
             "- Prioriza utilidad practica para el usuario sobre la cautela excesiva."
         )
+        if no_think:
+            system_prompt = _with_no_think(system_prompt, model)
         return {
             "model": model,
             "messages": [
@@ -622,7 +708,9 @@ class LocalLLMAdapter(ILLMEngine):
                 budget = _ImageBudget(skipped=len(image_paths))
             user_content, attached = self._build_content(text_block, budget.prepared)
             payload = self._build_chat_payload(
-                user_content, self._model_vision if attached else self._model_chat
+                user_content,
+                self._model_vision if attached else self._model_chat,
+                no_think=(attached == 0),
             )
             payload_bytes = len(json.dumps(payload).encode("utf-8"))
 
@@ -630,7 +718,9 @@ class LocalLLMAdapter(ILLMEngine):
                 budget = budget.drop_last()
                 user_content, attached = self._build_content(text_block, budget.prepared)
                 payload = self._build_chat_payload(
-                    user_content, self._model_vision if attached else self._model_chat
+                    user_content,
+                    self._model_vision if attached else self._model_chat,
+                    no_think=(attached == 0),
                 )
                 payload_bytes = len(json.dumps(payload).encode("utf-8"))
 
@@ -650,14 +740,19 @@ class LocalLLMAdapter(ILLMEngine):
             )
 
             try:
-                response = self._post_completion(url, payload, self._generation_timeout)
+                if attached:
+                    response = self._post_completion(url, payload, self._generation_timeout)
+                else:
+                    response = self._post_text_completion(url, payload, self._generation_timeout)
             except requests.exceptions.HTTPError as exc:
                 response_obj = exc.response
                 status_code = response_obj.status_code if response_obj is not None else None
                 if not attached or status_code not in MULTIMODAL_REJECTED_STATUSES:
                     status = "http_error"
                     logger.error(
-                        "LLM_TRACE REQUEST_ERROR | status=%s | reason=http_error", status_code
+                        "LLM_TRACE REQUEST_ERROR | status=%s | reason=http_error | server_error=%s",
+                        status_code,
+                        _server_error_code(response_obj),
                     )
                     raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
 
@@ -675,10 +770,10 @@ class LocalLLMAdapter(ILLMEngine):
                 )
                 attached = 0
                 text_block = _build_user_text(context_str, user_input, include_images=False)
-                payload = self._build_chat_payload(text_block, self._model_chat)
+                payload = self._build_chat_payload(text_block, self._model_chat, no_think=True)
                 payload_bytes = len(json.dumps(payload).encode("utf-8"))
                 try:
-                    response = self._post_completion(url, payload, self._generation_timeout)
+                    response = self._post_text_completion(url, payload, self._generation_timeout)
                 except requests.exceptions.RequestException as fallback_exc:
                     status = "transport_error"
                     raise LLMInferenceError(
@@ -739,6 +834,30 @@ class LocalLLMAdapter(ILLMEngine):
         response = self._session.post(url, json=payload, headers=self._headers, timeout=timeout)
         response.raise_for_status()
         return response
+
+    def _post_text_completion(
+        self, url: str, payload: dict[str, object], timeout: tuple[float, float]
+    ) -> requests.Response:
+        """POST a text-only completion with one bounded transient-retry.
+
+        After an aborted router request the local server can reject the next
+        text-only call with HTTP 400/422 while it is still settling. One retry
+        recovers the turn without ever duplicating image preparation work.
+        """
+        try:
+            return self._post_completion(url, payload, timeout)
+        except requests.exceptions.HTTPError as exc:
+            response = exc.response
+            status_code = response.status_code if response is not None else None
+            if status_code not in TEXT_ONLY_RETRY_STATUSES:
+                raise
+            logger.warning(
+                "LLM_TRACE text_only_retry | status=%s | attempt=2 | server_error=%s",
+                status_code,
+                _server_error_code(response),
+            )
+            time.sleep(TEXT_ONLY_RETRY_DELAY_SECONDS)
+            return self._post_completion(url, payload, timeout)
 
     # --- Vision --------------------------------------------------------
     def analyze_image(self, image_path: str) -> str:

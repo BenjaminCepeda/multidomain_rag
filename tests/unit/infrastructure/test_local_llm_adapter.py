@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from src.domain.exceptions.core_errors import LLMInferenceError
+from src.infrastructure.adapters import local_llm_adapter
 from src.infrastructure.adapters.local_llm_adapter import (
     MAX_IMAGES_PER_REQUEST,
     LocalLLMAdapter,
@@ -128,6 +129,75 @@ def test_text_only_generation_skips_images_and_strips_asset_paths(
     assert captured["payload"]["model"] == "test-model"
 
 
+def test_text_only_generation_adds_no_think_hint_for_qwen3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = LocalLLMAdapter(
+        endpoint="http://llm.test/v1",
+        model_chat="qwen3-14b",
+        timeout=5,
+    )
+    captured = _capture_payload(monkeypatch, adapter)
+
+    adapter.generate_response(["texto tecnico"], "pregunta", attach_images=False)
+
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert "/no_think" in system_prompt
+    content = captured["payload"]["messages"][1]["content"]
+    assert isinstance(content, str)
+
+
+def test_text_only_400_is_retried_once_before_succeeding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    payloads: list[dict[str, Any]] = []
+    responses = [_FakeResponse(status_code=400), _FakeResponse(content="respuesta texto")]
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        payloads.append(json.loads(json.dumps(kwargs["json"])))
+        return responses[len(payloads) - 1]
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+    monkeypatch.setattr(local_llm_adapter, "TEXT_ONLY_RETRY_DELAY_SECONDS", 0.0)
+
+    result = adapter.generate_response(["texto tecnico"], "pregunta", attach_images=False)
+
+    assert result == "respuesta texto"
+    assert len(payloads) == 2
+    for payload in payloads:
+        assert isinstance(payload["messages"][1]["content"], str)
+        assert "data:image" not in payload["messages"][1]["content"]
+    metrics = adapter.consume_call_metrics()
+    assert metrics is not None
+    assert metrics.status == "ok"
+    assert metrics.images_attached == 0
+    assert metrics.image_bytes == 0
+
+
+def test_text_only_400_retry_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    calls: list[int] = []
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(1)
+        return _FakeResponse(status_code=400)
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+    monkeypatch.setattr(local_llm_adapter, "TEXT_ONLY_RETRY_DELAY_SECONDS", 0.0)
+
+    with pytest.raises(LLMInferenceError):
+        adapter.generate_response(["texto tecnico"], "pregunta", attach_images=False)
+
+    assert len(calls) == 2
+    metrics = adapter.consume_call_metrics()
+    assert metrics is not None
+    assert metrics.status == "http_error"
+    assert metrics.images_attached == 0
+
+
 def test_image_paths_are_read_from_header_line_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,8 +313,39 @@ def test_router_is_bounded_and_disables_long_reasoning(
     payload = captured["json"]
     assert 32 <= payload["max_tokens"] <= 48
     assert payload["chat_template_kwargs"]["enable_thinking"] is False
+    response_format = payload["response_format"]
+    assert response_format["type"] == "json_schema"
+    schema = response_format["json_schema"]["schema"]
+    assert schema["properties"]["herramienta"]["enum"] == [
+        "buscar_manual",
+        "analizar_imagen",
+        "responder_directo",
+    ]
     assert captured["timeout"][0] == 1.5
     assert captured["timeout"][1] == 10.0
+
+
+def test_qwen3_router_adds_explicit_no_think_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = LocalLLMAdapter(
+        endpoint="http://llm.test/v1",
+        model_chat="qwen3-14b",
+        timeout=5,
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse(content='{"herramienta": "buscar_manual"}')
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    adapter.get_orchestrator_decision("consulta tecnica", False)
+
+    system_prompt = captured["json"]["messages"][0]["content"]
+    assert "/no_think" in system_prompt
+    assert captured["json"]["response_format"]["type"] == "json_schema"
 
 
 def test_router_timeout_is_reported_as_transport_status(

@@ -21,12 +21,16 @@ from src.infrastructure.config.settings import Settings
 class StubLLM(ILLMEngine):
     def __init__(self) -> None:
         self.last_context: list[str] = []
+        self.last_attach_images: bool | None = None
 
     def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision:
         return OrchestratorDecision(razonamiento="requiere manual", herramienta="buscar_manual")
 
-    def generate_response(self, context: Sequence[str], user_input: str) -> str:
+    def generate_response(
+        self, context: Sequence[str], user_input: str, *, attach_images: bool = True
+    ) -> str:
         self.last_context = list(context)
+        self.last_attach_images = attach_images
         return "respuesta sintetizada"
 
     def analyze_image(self, image_path: str) -> str:
@@ -288,8 +292,63 @@ class TimeoutRouterLLM(FailingRouterLLM):
 
 
 class FailingGenerateLLM(StubLLM):
-    def generate_response(self, context: Sequence[str], user_input: str) -> str:
+    def generate_response(
+        self, context: Sequence[str], user_input: str, *, attach_images: bool = True
+    ) -> str:
         raise LLMInferenceError("generation boom with sensitive detail")
+
+
+class TextOnlyMetricsLLM(StubLLM):
+    """Mimics the adapter modality metrics without touching the filesystem."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_metrics: LLMCallMetrics | None = None
+
+    def generate_response(
+        self, context: Sequence[str], user_input: str, *, attach_images: bool = True
+    ) -> str:
+        self.last_context = list(context)
+        self.last_attach_images = attach_images
+        candidates = sum(1 for item in context if "IMAGE_PATHS:" in item)
+        self._last_metrics = LLMCallMetrics(
+            operation="generate",
+            images_attached=0,
+            images_skipped=0 if attach_images else candidates,
+            image_prep_seconds=0.0,
+        )
+        return "respuesta sintetizada"
+
+    def consume_call_metrics(self) -> LLMCallMetrics | None:
+        metrics = self._last_metrics
+        self._last_metrics = None
+        return metrics
+
+
+def test_manual_search_requests_text_only_generation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    image = settings.extracted_images_dir / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    llm = TextOnlyMetricsLLM()
+    use_case = _use_case(settings, [_text_chunk(str(image))], llm=llm)
+
+    caplog.set_level(logging.INFO)
+    result = use_case.execute(InboundPayloadDTO(user_input="explica el proceso"))
+
+    assert result.used_tool == "buscar_manual"
+    assert llm.last_attach_images is False
+    trace = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("TURN_TRACE")
+    )
+    assert "images=0" in trace
+    assert "images_skipped=1" in trace
+    assert "image_bytes=0" in trace
+    assert "image_prep_ms=0.0" in trace
 
 
 def test_router_failure_fails_open_to_deterministic_search(

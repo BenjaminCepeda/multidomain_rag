@@ -214,7 +214,11 @@ class OrchestrateAgentUseCase:
 
             current_phase = "inference"
             generation_started_at = time.perf_counter()
-            respuesta_final = self._llm.generate_response(contexto_sintesis, payload.user_input)
+            respuesta_final = self._llm.generate_response(
+                contexto_sintesis,
+                payload.user_input,
+                attach_images=(used_tool == "analizar_imagen"),
+            )
             generation_wall = time.perf_counter() - generation_started_at
             generation_metrics = self._llm.consume_call_metrics()
             image_prep_seconds, inference_seconds, image_stats = self._split_generation(

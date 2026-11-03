@@ -423,6 +423,19 @@ class LocalLLMAdapter(ILLMEngine):
                     image_paths.append(path)
         return list(dict.fromkeys(image_paths))
 
+    @staticmethod
+    def _strip_image_path_headers(context: Sequence[str]) -> list[str]:
+        """Remove image path headers before a text-only generation request.
+
+        ``buscar_manual`` must never forward asset paths or Base64 payloads:
+        only the retrieved fragment text reaches the local engine.
+        """
+        cleaned: list[str] = []
+        for item in context:
+            lines = [line for line in item.splitlines() if "IMAGE_PATHS:" not in line]
+            cleaned.append("\n".join(lines))
+        return cleaned
+
     def _safe_image_path(self, raw_path: str, allowed_root: Path | None) -> Path | None:
         if not raw_path or "\x00" in raw_path:
             return None
@@ -569,7 +582,13 @@ class LocalLLMAdapter(ILLMEngine):
             )
         return content, len(images)
 
-    def generate_response(self, context: Sequence[str], user_input: str) -> str:
+    def generate_response(
+        self,
+        context: Sequence[str],
+        user_input: str,
+        *,
+        attach_images: bool = True,
+    ) -> str:
         started = time.perf_counter()
         queue_wait = 0.0
         status = "ok"
@@ -588,10 +607,19 @@ class LocalLLMAdapter(ILLMEngine):
             url = f"{self._endpoint}/chat/completions"
             context_str = "\n\n".join(context)
             image_paths = self._collect_image_paths(context)
-            text_block = _build_user_text(context_str, user_input, include_images=bool(image_paths))
-            budget = self._prepare_images(
-                image_paths, reserved_bytes=len(text_block.encode("utf-8")) + 2048
-            )
+            if attach_images:
+                text_block = _build_user_text(
+                    context_str, user_input, include_images=bool(image_paths)
+                )
+                budget = self._prepare_images(
+                    image_paths, reserved_bytes=len(text_block.encode("utf-8")) + 2048
+                )
+            else:
+                # Text-only modality: report the detected candidates as
+                # skipped without reading, encoding or forwarding any asset.
+                context_str = "\n\n".join(self._strip_image_path_headers(context))
+                text_block = _build_user_text(context_str, user_input, include_images=False)
+                budget = _ImageBudget(skipped=len(image_paths))
             user_content, attached = self._build_content(text_block, budget.prepared)
             payload = self._build_chat_payload(
                 user_content, self._model_vision if attached else self._model_chat

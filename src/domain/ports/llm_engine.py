@@ -20,7 +20,20 @@ class ILLMEngine(ABC):
     ) -> OrchestratorDecision: ...
 
     @abstractmethod
-    def generate_response(self, context: Sequence[str], user_input: str) -> str: ...
+    def generate_response(
+        self,
+        context: Sequence[str],
+        user_input: str,
+        *,
+        attach_images: bool = True,
+    ) -> str:
+        """Synthesize an answer from text context.
+
+        ``attach_images`` is the explicit modality gate: callers set it to
+        ``False`` when the active tool only needs the retrieved text, so the
+        adapter must not attach vision derivatives from the fragments.
+        """
+        ...
 
     @abstractmethod
     def analyze_image(self, image_path: str) -> str: ...

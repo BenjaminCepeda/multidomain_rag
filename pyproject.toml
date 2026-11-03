@@ -8,28 +8,21 @@ dependencies = [
     # --- Interface & Web ---
     "gradio==5.29.0",
     "requests==2.32.3",
-    # --- Python 3.13 compatibility (audioop) ---
+    # --- Python 3.13 compatibility (audioop was removed from the stdlib) ---
     "audioop-lts==0.2.1",
     # --- Environment & Configuration ---
-    "python-dotenv==1.0.1",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
-    "typing-extensions>=4.12.0",
-    # --- AI & NLP ---
-    "huggingface-hub>=1.5.0,<2.0",
+    # --- AI & NLP (sentence-transformers pulls transformers and huggingface-hub) ---
     "sentence-transformers>=3.3.0",
-    "transformers==5.7.0",
     "torch==2.6.0",
     # --- Documents & Vector Store ---
     "pymupdf==1.25.1",
     "qdrant-client==1.12.0",
     "pillow>=11.0.0,<12.0.0",
-    # --- HTTP client (LM Studio integration) ---
-    "httpx>=0.27.0",
-    # --- Speech-to-Text ---
+    # --- Speech-to-Text (pydub invokes the system ffmpeg binary) ---
     "faster-whisper>=1.0.0",
     "pydub==0.25.1",
-    "ffmpeg-python==0.2.0",
 ]
 
 [dependency-groups]

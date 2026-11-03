@@ -94,6 +94,40 @@ def test_generate_response_without_images_keeps_plain_text_content(
     assert "Texto tecnico" in content
 
 
+def test_text_only_generation_skips_images_and_strips_asset_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    adapter = _adapter()
+    captured = _capture_payload(monkeypatch, adapter)
+
+    def _forbidden_prepare(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("text-only modality must not prepare images")
+
+    monkeypatch.setattr(adapter, "_prepare_images", _forbidden_prepare)
+
+    adapter.generate_response(_context_with_images([image]), "pregunta", attach_images=False)
+
+    content = captured["payload"]["messages"][1]["content"]
+    assert isinstance(content, str)
+    assert "Cuerpo del fragmento" in content
+    assert "IMAGE_PATHS" not in content
+    assert "data:image" not in content
+    assert str(image) not in content
+    assert "imagenes adjuntas" not in content
+
+    metrics = adapter.consume_call_metrics()
+    assert metrics is not None
+    assert metrics.operation == "generate"
+    assert metrics.images_attached == 0
+    assert metrics.images_skipped == 1
+    assert metrics.image_bytes == 0
+    assert metrics.image_pixels == 0
+    assert metrics.image_prep_seconds == 0.0
+    assert captured["payload"]["model"] == "test-model"
+
+
 def test_image_paths_are_read_from_header_line_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

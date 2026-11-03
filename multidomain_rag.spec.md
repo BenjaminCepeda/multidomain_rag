@@ -381,7 +381,7 @@ Rules:
 - All dependencies declared in `pyproject.toml` under `[project.dependencies]` and `[project.optional-dependencies]`.
 - Install via `uv add <pkg>` (never `pip install` globally).
 - Lock via `uv lock`; commit `uv.lock`.
-- No `requirements.txt` as source of truth (may be generated for compatibility but not edited by hand).
+- No `requirements.txt`: `pyproject.toml` and `uv.lock` are the only sources of truth for dependencies.
 - Python version pinned via `.python-version` (3.13).
 
 ### 3.5 Branch Protection (GitHub)

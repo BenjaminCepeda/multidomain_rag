@@ -11,11 +11,6 @@ logging.basicConfig(
 )
 
 
-def setup_environment() -> None:
-    """Composition root handles settings; this is a no-op placeholder for compatibility."""
-    return None
-
-
 def main() -> None:
     logger = logging.getLogger("MainSystem")
     try:

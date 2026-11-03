@@ -210,7 +210,7 @@ def test_router_is_bounded_and_disables_long_reasoning(
     assert 32 <= payload["max_tokens"] <= 48
     assert payload["chat_template_kwargs"]["enable_thinking"] is False
     assert captured["timeout"][0] == 1.5
-    assert 8.0 <= captured["timeout"][1] <= 10.0
+    assert captured["timeout"][1] == 10.0
 
 
 def test_router_timeout_is_reported_as_transport_status(

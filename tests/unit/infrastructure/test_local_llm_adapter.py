@@ -12,20 +12,35 @@ from src.infrastructure.adapters.local_llm_adapter import (
     MAX_IMAGES_PER_REQUEST,
     LocalLLMAdapter,
     _CircuitBreaker,
+    _safe_error_detail,
 )
 from src.infrastructure.config.settings import Settings
 
 
 class _FakeResponse:
-    def __init__(self, content: str = "respuesta", status_code: int = 200) -> None:
+    def __init__(
+        self,
+        content: str = "respuesta",
+        status_code: int = 200,
+        body: str | None = None,
+    ) -> None:
         self._content = content
         self.status_code = status_code
+        self._body = body
+
+    @property
+    def text(self) -> str:
+        return self._body if self._body is not None else json.dumps(self.json())
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
             raise requests.HTTPError(f"{self.status_code} error", response=self)  # type: ignore[arg-type]
 
     def json(self) -> dict[str, Any]:
+        if self._body is not None:
+            parsed = json.loads(self._body)
+            if isinstance(parsed, dict):
+                return parsed
         return {"choices": [{"message": {"content": self._content}}]}
 
 
@@ -73,10 +88,13 @@ def test_generate_response_with_images_does_not_reference_missing_user_msg(
     result = adapter.generate_response(_context_with_images([image]), "muestrame el grafico")
 
     assert result == "respuesta"
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert "imágenes/diagramas adjuntos" in system_prompt
     content = captured["payload"]["messages"][1]["content"]
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert "Cuerpo del fragmento" in content[0]["text"]
+    assert "imágenes adjuntas" in content[0]["text"]
     image_parts = [part for part in content if part["type"] == "image_url"]
     assert len(image_parts) == 1
     assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
@@ -111,12 +129,15 @@ def test_text_only_generation_skips_images_and_strips_asset_paths(
     adapter.generate_response(_context_with_images([image]), "pregunta", attach_images=False)
 
     content = captured["payload"]["messages"][1]["content"]
+    system_prompt = captured["payload"]["messages"][0]["content"]
     assert isinstance(content, str)
     assert "Cuerpo del fragmento" in content
     assert "IMAGE_PATHS" not in content
     assert "data:image" not in content
     assert str(image) not in content
-    assert "imagenes adjuntas" not in content
+    assert "imágenes adjuntas" not in content
+    assert "imágenes/diagramas adjuntos" not in system_prompt
+    assert "imágenes" not in system_prompt
 
     metrics = adapter.consume_call_metrics()
     assert metrics is not None
@@ -127,6 +148,19 @@ def test_text_only_generation_skips_images_and_strips_asset_paths(
     assert metrics.image_pixels == 0
     assert metrics.image_prep_seconds == 0.0
     assert captured["payload"]["model"] == "test-model"
+
+
+def test_system_prompt_is_domain_agnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _adapter()
+    captured = _capture_payload(monkeypatch, adapter)
+
+    adapter.generate_response(["texto tecnico"], "pregunta", attach_images=False)
+
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert "asistente técnico" in system_prompt
+    assert "documentación técnica" in system_prompt
+    for forbidden in ("Epson", "impresora", "manuales de impresoras", "Epson Scan"):
+        assert forbidden not in system_prompt
 
 
 def test_text_only_generation_adds_no_think_hint_for_qwen3(
@@ -198,6 +232,60 @@ def test_text_only_400_retry_is_bounded(
     assert metrics.images_attached == 0
 
 
+def test_safe_error_detail_redacts_paths_uris_and_blobs() -> None:
+    blob = "A" * 120
+    body = json.dumps(
+        {
+            "error": {
+                "message": (
+                    f"bad /home/benja/secret.pdf data:image/png;base64,{blob} token {blob}"
+                ),
+                "type": "invalid_request_error",
+            }
+        }
+    )
+    response = _FakeResponse(status_code=400, body=body)
+
+    detail = _safe_error_detail(response)
+
+    assert "<path>" in detail
+    assert "<data-uri>" in detail
+    assert "<blob>" in detail
+    assert "/home/benja" not in detail
+    assert "data:image" not in detail
+    assert blob not in detail
+    assert len(detail) <= 512
+
+
+def test_http_error_logs_redacted_server_detail(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    adapter = _adapter()
+    secret_path = "/home/benja/private/manual.pdf"
+    body = json.dumps(
+        {
+            "error": {
+                "message": f"invalid request for {secret_path}",
+                "type": "invalid_request_error",
+            }
+        }
+    )
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(status_code=400, body=body)
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+    monkeypatch.setattr(local_llm_adapter, "TEXT_ONLY_RETRY_DELAY_SECONDS", 0.0)
+
+    with caplog.at_level("ERROR"), pytest.raises(LLMInferenceError):
+        adapter.generate_response(["texto tecnico"], "pregunta", attach_images=False)
+
+    logged = caplog.text
+    assert "server_detail=" in logged
+    assert "<path>" in logged
+    assert secret_path not in logged
+
+
 def test_image_paths_are_read_from_header_line_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -227,9 +315,15 @@ def test_unreadable_images_fall_back_to_text_only_request(
 
     adapter.generate_response(_context_with_images([image]), "pregunta")
 
+    system_prompt = captured["payload"]["messages"][0]["content"]
     content = captured["payload"]["messages"][1]["content"]
     assert isinstance(content, str)
     assert "pregunta" in content
+    assert "IMAGE_PATHS" not in content
+    assert str(image) not in content
+    assert "imágenes adjuntas" not in content
+    assert "imágenes/diagramas adjuntos" not in system_prompt
+    assert "imágenes" not in system_prompt
 
 
 def test_images_are_capped_per_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,7 +366,10 @@ def test_multimodal_rejection_falls_back_to_text_only(
     assert isinstance(first_content, list)
     assert isinstance(second_content, str)
     assert "pregunta" in second_content
-    assert "imagenes adjuntas" not in second_content
+    assert "imágenes adjuntas" not in second_content
+    fallback_system = payloads[1]["messages"][0]["content"]
+    assert "imágenes/diagramas adjuntos" not in fallback_system
+    assert "imágenes" not in fallback_system
 
 
 def test_non_multimodal_http_error_is_not_retried(

@@ -11,7 +11,7 @@ from src.application.dtos.agent_dtos import (
     OutboundResponseDTO,
     VisualEvidenceDTO,
 )
-from src.domain.exceptions.core_errors import DomainBaseError
+from src.domain.exceptions.core_errors import DomainBaseError, UnsupportedVisionModelError
 from src.domain.models.document import ManualChunk
 from src.domain.models.embedding import EmbeddingVector
 from src.domain.models.telemetry import LLMCallMetrics, PhaseTimings, TurnTrace
@@ -93,6 +93,7 @@ class OrchestrateAgentUseCase:
         used_tool = "orquestador"
         current_phase = "router"
         router_degraded = False
+        vision_degraded = False
         error_code: str | None = None
 
         try:
@@ -201,19 +202,59 @@ class OrchestrateAgentUseCase:
                 prompt_seconds = time.perf_counter() - prompt_start
 
             elif used_tool == "analizar_imagen":
+                vision_analysis: str | None = None
                 if payload.image_path:
                     current_phase = "vision"
                     vision_start = time.perf_counter()
-                    vision_analysis = self._llm.analyze_image(
-                        payload.image_path, question=payload.user_input
-                    )
-                    vision_analysis_seconds = time.perf_counter() - vision_start
-                    vision_metrics = self._llm.consume_call_metrics()
-                    if vision_metrics is not None:
-                        vision_analysis_seconds = max(
-                            0.0, vision_analysis_seconds - vision_metrics.queue_wait_seconds
+                    try:
+                        vision_analysis = self._llm.analyze_image(
+                            payload.image_path, question=payload.user_input
                         )
-                    contexto_sintesis = [f"[FUENTE: imagen]\n{vision_analysis}"]
+                    except UnsupportedVisionModelError:
+                        vision_degraded = True
+                        error_code = "vision_unsupported"
+                        logger.warning(
+                            "VISION_FALLBACK | turn_id=%s | phase=vision | "
+                            "reason=vision_unsupported",
+                            turn_id,
+                        )
+                    finally:
+                        vision_analysis_seconds = time.perf_counter() - vision_start
+                        vision_metrics = self._llm.consume_call_metrics()
+                        if vision_metrics is not None:
+                            vision_analysis_seconds = max(
+                                0.0,
+                                vision_analysis_seconds - vision_metrics.queue_wait_seconds,
+                            )
+
+                    if vision_analysis is not None:
+                        contexto_sintesis = [f"[FUENTE: imagen]\n{vision_analysis}"]
+                    elif payload.user_input.strip():
+                        # The uploaded image cannot be inspected by the local
+                        # engine; answer the textual query with the manuals so
+                        # the turn still delivers traceable value.
+                        used_tool = "buscar_manual"
+                        current_phase = "embedding"
+                        embedding_start = time.perf_counter()
+                        query_vector = self._embedding.embed_text(payload.user_input)
+                        embedding_seconds = time.perf_counter() - embedding_start
+
+                        current_phase = "retrieval"
+                        retrieval_start = time.perf_counter()
+                        candidates = self._repo.search(
+                            query_vector=query_vector,
+                            limit=self._settings.vision_evidence_candidate_limit,
+                            min_score=0.20,
+                        )
+                        retrieval_seconds = time.perf_counter() - retrieval_start
+                        fallback_chunks = candidates[:VISUAL_INTENT_PAGE_CHUNKS]
+                        citation_chunks = list(fallback_chunks)
+                        current_phase = "prompt"
+                        prompt_start = time.perf_counter()
+                        contexto_sintesis, context_chars, truncated_chunks = (
+                            self._build_prompt_context(fallback_chunks, turn_id)
+                        )
+                        prompt_seconds = time.perf_counter() - prompt_start
                 else:
                     # No uploaded image: the visual intent is satisfied by the
                     # most semantically relevant indexed figure, if any.
@@ -245,17 +286,27 @@ class OrchestrateAgentUseCase:
                         target = visual_evidence[0]
                         current_phase = "vision"
                         vision_start = time.perf_counter()
-                        vision_analysis = self._llm.analyze_image(
-                            target.original_path or target.image_path,
-                            question=payload.user_input,
-                        )
-                        vision_analysis_seconds = time.perf_counter() - vision_start
-                        vision_metrics = self._llm.consume_call_metrics()
-                        if vision_metrics is not None:
-                            vision_analysis_seconds = max(
-                                0.0,
-                                vision_analysis_seconds - vision_metrics.queue_wait_seconds,
+                        try:
+                            vision_analysis = self._llm.analyze_image(
+                                target.analysis_path,
+                                question=payload.user_input,
                             )
+                        except UnsupportedVisionModelError:
+                            vision_degraded = True
+                            error_code = "vision_unsupported"
+                            logger.warning(
+                                "VISION_FALLBACK | turn_id=%s | phase=vision | "
+                                "reason=vision_unsupported",
+                                turn_id,
+                            )
+                        finally:
+                            vision_analysis_seconds = time.perf_counter() - vision_start
+                            vision_metrics = self._llm.consume_call_metrics()
+                            if vision_metrics is not None:
+                                vision_analysis_seconds = max(
+                                    0.0,
+                                    vision_analysis_seconds - vision_metrics.queue_wait_seconds,
+                                )
 
                         current_phase = "prompt"
                         prompt_start = time.perf_counter()
@@ -267,15 +318,18 @@ class OrchestrateAgentUseCase:
                             include_image_paths=False,
                         )
                         prompt_seconds = time.perf_counter() - prompt_start
-                        contexto_sintesis = [
-                            f"[FUENTE: imagen]\n{vision_analysis}",
-                            *text_context,
-                        ]
+                        contexto_sintesis = (
+                            [f"[FUENTE: imagen]\n{vision_analysis}", *text_context]
+                            if vision_analysis is not None
+                            else text_context
+                        )
                         logger.info(
-                            "VISUAL_ANALYSIS | turn_id=%s | evidence=%d | analyzed=%d",
+                            "VISUAL_ANALYSIS | turn_id=%s | evidence=%d | analyzed=%d | "
+                            "degraded=%s",
                             turn_id,
                             len(visual_evidence),
-                            1,
+                            1 if vision_analysis is not None else 0,
+                            vision_degraded,
                         )
                     else:
                         # Avoid rendering unrelated graphics: degrade to a
@@ -314,17 +368,24 @@ class OrchestrateAgentUseCase:
             respuesta_final, citation_stats = CitationRenderer(citation_chunks).render(
                 respuesta_final
             )
-            if citation_stats.placeholders:
+            if citation_stats.placeholders or citation_stats.incomplete_tails:
                 logger.info(
-                    "CITATION_RENDER | turn_id=%s | placeholders=%d | replaced=%d | fallback=%s",
+                    "CITATION_RENDER | turn_id=%s | placeholders=%d | replaced=%d | "
+                    "incomplete=%d | incomplete_replaced=%d | incomplete_removed=%d | "
+                    "fallback=%s",
                     turn_id,
                     citation_stats.placeholders,
                     citation_stats.replaced,
+                    citation_stats.incomplete_tails,
+                    citation_stats.incomplete_replaced,
+                    citation_stats.incomplete_removed,
                     citation_stats.used_fallback_source,
                 )
 
             total_seconds = time.perf_counter() - start_time
             current_phase = "complete"
+            turn_degraded = router_degraded or vision_degraded
+            degraded_phase = "router" if router_degraded else "vision" if vision_degraded else None
             timings = PhaseTimings(
                 routing_seconds=routing_seconds,
                 embedding_seconds=embedding_seconds,
@@ -347,16 +408,16 @@ class OrchestrateAgentUseCase:
                 payload_bytes=image_stats.payload_bytes,
                 context_chars=context_chars,
                 truncated_chunks=truncated_chunks,
-                degraded=router_degraded,
-                degraded_phase="router" if router_degraded else None,
+                degraded=turn_degraded,
+                degraded_phase=degraded_phase,
                 error_code=error_code,
-                status="degraded" if router_degraded else "ok",
+                status="degraded" if turn_degraded else "ok",
             )
             logger.info(trace.format_line())
 
             return OutboundResponseDTO(
                 response_text=respuesta_final,
-                is_degraded=router_degraded,
+                is_degraded=turn_degraded,
                 used_tool=used_tool,
                 error_log=error_code,
                 elapsed_seconds=total_seconds,
@@ -612,7 +673,7 @@ class OrchestrateAgentUseCase:
         vectors = self._embedding.embed_batch(
             [self._chunk_embedding_input(chunk) for chunk in scored_chunks]
         )
-        candidates: list[tuple[float, ManualChunk, Path, Path | None]] = []
+        candidates: list[tuple[float, ManualChunk, Path, Path | None, Path | None]] = []
         best_score = 0.0
 
         for chunk, vector in zip(scored_chunks, vectors, strict=True):
@@ -623,6 +684,7 @@ class OrchestrateAgentUseCase:
 
             originals = self._chunk_image_paths(chunk)
             thumbnails = self._chunk_thumb_paths(chunk)
+            vision_paths = self._chunk_vision_paths(chunk)
             for index, raw_path in enumerate(originals):
                 resolved = self._resolve_asset_path(raw_path, assets_dir)
                 if resolved is None:
@@ -636,7 +698,9 @@ class OrchestrateAgentUseCase:
                 thumbnail = (
                     self._resolve_asset_path(thumbnail_raw, assets_dir) if thumbnail_raw else None
                 )
-                candidates.append((score, chunk, resolved, thumbnail))
+                vision_raw = vision_paths[index] if index < len(vision_paths) else ""
+                vision = self._resolve_asset_path(vision_raw, assets_dir) if vision_raw else None
+                candidates.append((score, chunk, resolved, thumbnail, vision))
 
         candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         top_score = best_score
@@ -644,7 +708,7 @@ class OrchestrateAgentUseCase:
         evidence: list[VisualEvidenceDTO] = []
         seen_paths: set[str] = set()
         seen_hashes: set[str] = set()
-        for _score, chunk, resolved, thumbnail in candidates:
+        for _score, chunk, resolved, thumbnail, vision in candidates:
             resolved_key = str(resolved)
             digest = chunk.metadata.get("image_sha256")
             digest_key = str(digest) if digest else ""
@@ -664,6 +728,7 @@ class OrchestrateAgentUseCase:
                     page=chunk.page,
                     thumbnail_path=str(thumbnail or resolved),
                     original_path=str(resolved),
+                    vision_path=str(vision) if vision is not None else None,
                 )
             )
             if len(evidence) >= limit:
@@ -694,6 +759,16 @@ class OrchestrateAgentUseCase:
         if isinstance(single, str) and single.strip():
             return [single.strip()]
         multiple = chunk.metadata.get("thumb_paths")
+        if isinstance(multiple, str):
+            return [path.strip() for path in multiple.split("|") if path.strip()]
+        return []
+
+    @staticmethod
+    def _chunk_vision_paths(chunk: ManualChunk) -> list[str]:
+        single = chunk.metadata.get("vision_path")
+        if isinstance(single, str) and single.strip():
+            return [single.strip()]
+        multiple = chunk.metadata.get("vision_paths")
         if isinstance(multiple, str):
             return [path.strip() for path in multiple.split("|") if path.strip()]
         return []

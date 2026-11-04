@@ -19,6 +19,12 @@ class LLMInferenceError(DomainBaseError):
     pass
 
 
+class UnsupportedVisionModelError(LLMInferenceError):
+    """El modelo configurado rechaza las entradas de imagen (visión)."""
+
+    pass
+
+
 class VectorStorageError(DomainBaseError):
     """Se lanza ante fallos de conexión, lectura o escritura en el espacio de Qdrant."""
 

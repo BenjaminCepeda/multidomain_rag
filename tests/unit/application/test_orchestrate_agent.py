@@ -6,7 +6,7 @@ import pytest
 
 from src.application.dtos.agent_dtos import InboundPayloadDTO
 from src.application.use_cases.orchestrate_agent import OrchestrateAgentUseCase
-from src.domain.exceptions.core_errors import LLMInferenceError
+from src.domain.exceptions.core_errors import LLMInferenceError, UnsupportedVisionModelError
 from src.domain.models.agent import OrchestratorDecision
 from src.domain.models.document import ManualChunk
 from src.domain.models.embedding import EmbeddingVector
@@ -331,6 +331,13 @@ class FailingGenerateLLM(StubLLM):
         raise LLMInferenceError("generation boom with sensitive detail")
 
 
+class UnsupportedVisionLLM(StubLLM):
+    def analyze_image(self, image_path: str, question: str | None = None) -> str:
+        self.analyzed_images.append(image_path)
+        self.last_vision_question = question
+        raise UnsupportedVisionModelError("vision model rejected the image")
+
+
 class TextOnlyMetricsLLM(StubLLM):
     """Mimics the adapter modality metrics without touching the filesystem."""
 
@@ -546,6 +553,117 @@ def test_visual_intent_forces_image_analysis_over_router_choice(tmp_path: Path) 
     assert llm.analyzed_images == [str(image.resolve())]
     assert llm.last_vision_question == query
     assert [Path(item.image_path).name for item in result.visual_evidence] == ["hls.png"]
+
+
+def test_visual_analysis_uses_the_optimized_vision_derivative(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    original = settings.extracted_images_dir / "diagram.png"
+    derivative = settings.extracted_images_dir / "diagram_v1.jpg"
+    thumbnail = settings.extracted_images_dir / "diagram_t.jpg"
+    original.write_bytes(b"\x89PNG\r\n\x1a\n" + b"original")
+    derivative.write_bytes(b"\xff\xd8\xff" + b"derivative")
+    thumbnail.write_bytes(b"\xff\xd8\xff" + b"thumb")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-derivative"),
+        content="[IMAGEN] Diagrama de arquitectura",
+        page=7,
+        is_visual=True,
+        metadata={
+            "image_path": str(original),
+            "vision_path": str(derivative),
+            "thumb_path": str(thumbnail),
+            "image_title": "Diagrama",
+            "document_title": "Manual",
+            "document_name": "manual.pdf",
+            "page_number": 7,
+        },
+    )
+    llm = StubLLM()
+    use_case = _use_case(settings, [chunk], llm=llm)
+
+    result = use_case.execute(InboundPayloadDTO(user_input="muestrame el diagrama"))
+
+    evidence = result.visual_evidence[0]
+    assert evidence.image_path == str(original.resolve())
+    assert evidence.original_path == str(original.resolve())
+    assert evidence.vision_path == str(derivative.resolve())
+    assert evidence.display_path == str(thumbnail.resolve())
+    assert evidence.analysis_path == str(derivative.resolve())
+    assert llm.analyzed_images == [str(derivative.resolve())]
+
+
+def test_visual_intent_degrades_to_text_when_model_rejects_images(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    original = settings.extracted_images_dir / "diagram.png"
+    derivative = settings.extracted_images_dir / "diagram_v1.jpg"
+    original.write_bytes(b"\x89PNG\r\n\x1a\n")
+    derivative.write_bytes(b"\xff\xd8\xff")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-unsupported"),
+        content="[IMAGEN] Diagrama de arquitectura de un detector de objetos",
+        page=7,
+        is_visual=True,
+        metadata={
+            "image_path": str(original),
+            "vision_path": str(derivative),
+            "image_title": "Diagrama",
+            "document_title": "Manual",
+            "document_name": "manual.pdf",
+            "page_number": 7,
+        },
+    )
+    llm = UnsupportedVisionLLM()
+    use_case = _use_case(settings, [chunk], llm=llm)
+
+    caplog.set_level(logging.INFO)
+    result = use_case.execute(InboundPayloadDTO(user_input="muestrame el diagrama"))
+
+    assert result.used_tool == "analizar_imagen"
+    assert result.is_degraded is True
+    assert result.error_log == "vision_unsupported"
+    assert result.response_text == "respuesta sintetizada"
+    assert result.visual_evidence
+    assert result.visual_evidence[0].image_path == str(original.resolve())
+    assert llm.analyzed_images == [str(derivative.resolve())]
+    assert llm.last_context
+    assert "VISION_FALLBACK" in caplog.text
+    assert "degraded_phase=vision" in caplog.text
+    assert "error_code=vision_unsupported" in caplog.text
+
+
+def test_uploaded_image_vision_rejection_falls_back_to_manual_search(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    uploaded = tmp_path / "upload.png"
+    uploaded.write_bytes(b"\x89PNG\r\n\x1a\n")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("text-fallback"),
+        content="La inferencia se ejecuta en microcontroladores de baja potencia.",
+        page=7,
+        metadata={
+            "source": "manual_principal.pdf",
+            "page_number": 7,
+            "document_title": "TinyML edge deployment",
+        },
+    )
+    llm = UnsupportedVisionLLM()
+    use_case = _use_case(settings, [chunk], llm=llm)
+
+    result = use_case.execute(
+        InboundPayloadDTO(user_input="muestrame el proceso de inferencia", image_path=str(uploaded))
+    )
+
+    assert result.used_tool == "buscar_manual"
+    assert result.is_degraded is True
+    assert result.error_log == "vision_unsupported"
+    assert result.response_text == "respuesta sintetizada"
+    assert result.visual_evidence == ()
+    assert llm.last_attach_images is False
+    assert llm.last_context
+    assert "FUENTE: manual_principal.pdf" in llm.last_context[0]
 
 
 def test_visual_evidence_filters_unrelated_graphics_from_same_page(tmp_path: Path) -> None:

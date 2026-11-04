@@ -16,7 +16,11 @@ from PIL import Image
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from src.domain.exceptions.core_errors import DataIncompleteError, LLMInferenceError
+from src.domain.exceptions.core_errors import (
+    DataIncompleteError,
+    LLMInferenceError,
+    UnsupportedVisionModelError,
+)
 from src.domain.models.agent import OrchestratorDecision
 from src.domain.models.telemetry import LLMCallMetrics
 from src.domain.ports.llm_engine import ILLMEngine
@@ -183,6 +187,10 @@ def _server_error_code(response: requests.Response | None) -> str:
     except Exception:
         return "unknown"
     markers = (
+        ("does not support image", "vision_unsupported"),
+        ("does not support vision", "vision_unsupported"),
+        ("image inputs", "vision_unsupported"),
+        ("unsupported image", "vision_unsupported"),
         ("response_format", "invalid_response_format"),
         ("context length", "context_length_exceeded"),
         ("too long", "context_length_exceeded"),
@@ -998,6 +1006,33 @@ class LocalLLMAdapter(ILLMEngine):
             except requests.exceptions.ConnectionError as exc:
                 status = "unavailable"
                 raise LLMInferenceError("No se pudo conectar al LLM local.", exc) from exc
+            except requests.exceptions.HTTPError as exc:
+                response_obj = exc.response
+                status_code = response_obj.status_code if response_obj is not None else None
+                server_code = _server_error_code(response_obj)
+                if (
+                    status_code in MULTIMODAL_REJECTED_STATUSES
+                    and server_code == "vision_unsupported"
+                ):
+                    status = "vision_unsupported"
+                    logger.warning(
+                        "LLM_TRACE vision rejected | status=%s | reason=vision_unsupported "
+                        "| server_error=%s",
+                        status_code,
+                        server_code,
+                    )
+                    raise UnsupportedVisionModelError(
+                        "El modelo de vision configurado no acepta imagenes.", exc
+                    ) from exc
+                status = "http_error"
+                logger.error(
+                    "LLM_TRACE REQUEST_ERROR | stage=vision | status=%s | reason=http_error "
+                    "| server_error=%s | server_detail=%s",
+                    status_code,
+                    server_code,
+                    _safe_error_detail(response_obj),
+                )
+                raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc
             except requests.exceptions.RequestException as exc:
                 status = "transport_error"
                 raise LLMInferenceError("Error de comunicacion con el LLM local.", exc) from exc

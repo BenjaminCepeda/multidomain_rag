@@ -19,6 +19,9 @@ from src.domain.models.document import ManualChunk
 from src.domain.models.ids import ChunkId, DocumentId
 from src.domain.ports.document_extractor import IDocumentExtractor
 from src.domain.services.file_fingerprint import compute_file_sha256
+from src.domain.services.visual_embedding import (
+    build_visual_embedding_text as _build_visual_embedding_text,
+)
 from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -30,10 +33,6 @@ MAX_TITLE_CHARS = 140
 MAX_THEME_KEYWORDS = 8
 PROFILE_PAGE_LIMIT = 3
 CAPTION_MAX_CHARS = 90
-MAX_VISUAL_EMBEDDING_CHARS = 400
-MAX_VISUAL_EMBEDDING_TITLE_CHARS = 100
-MAX_VISUAL_EMBEDDING_DOCUMENT_CHARS = 80
-MAX_VISUAL_EMBEDDING_THEME_CHARS = 90
 VISION_TRANSFORM_VERSION = 1
 
 type BlockInfo = tuple[float, float, float, float, str, int, int]
@@ -300,46 +299,6 @@ def _build_visual_content(
     if surrounding_text_context:
         parts.append(f"Texto circundante: {surrounding_text_context}")
     return "\n".join(parts)
-
-
-def _clip_embedding_part(text: str, limit: int) -> str:
-    normalized = _normalize(text)
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 1:
-        return normalized[:limit]
-    return normalized[: limit - 1].rstrip() + "…"
-
-
-def _build_visual_embedding_text(
-    document_title: str,
-    document_name: str,
-    image_title: str,
-    page_number: int,
-    theme_summary: str,
-    surrounding_text_context: str,
-) -> str:
-    """Build a bounded dense-embedding text for a visual asset.
-
-    The rich ``content`` remains available for payloads and the LLM. Dense
-    embeddings only receive the identity of the figure, its document, its
-    theme and a short context window, capped at ``MAX_VISUAL_EMBEDDING_CHARS``
-    to avoid padding amplification in mixed text/visual batches.
-    """
-    title = _clip_embedding_part(image_title, MAX_VISUAL_EMBEDDING_TITLE_CHARS)
-    document = _clip_embedding_part(
-        document_title or document_name, MAX_VISUAL_EMBEDDING_DOCUMENT_CHARS
-    )
-    theme = _clip_embedding_part(theme_summary, MAX_VISUAL_EMBEDDING_THEME_CHARS)
-    header = f"[IMAGEN] {title}\nDocumento: {document} (pag. {page_number})\nTema: {theme}"
-    prefix = f"{header}\nContexto: "
-    remaining = MAX_VISUAL_EMBEDDING_CHARS - len(prefix)
-    if remaining <= 0:
-        return header[:MAX_VISUAL_EMBEDDING_CHARS]
-    context = _clip_embedding_part(surrounding_text_context, remaining)
-    if not context:
-        return header
-    return f"{prefix}{context}"[:MAX_VISUAL_EMBEDDING_CHARS]
 
 
 class PyMuPDFAdapter(IDocumentExtractor):

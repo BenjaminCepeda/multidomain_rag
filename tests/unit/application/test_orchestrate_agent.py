@@ -631,3 +631,120 @@ def test_visual_intent_falls_back_to_text_when_no_visual_is_relevant(tmp_path: P
     assert result.visual_evidence == ()
     assert llm.analyzed_images == []
     assert llm.last_attach_images is False
+
+
+class RecipeAwareEmbedding(IEmbeddingService):
+    """Separates the compact visual recipe from the rich fallback content."""
+
+    def _embed(self, text: str) -> EmbeddingVector:
+        lowered = text.casefold()
+        if "pipeline" in lowered and "diagram" in lowered:
+            return EmbeddingVector(values=(1.0, 0.0))
+        if "[imagen]" in lowered and "tema: pipeline" in lowered:
+            return EmbeddingVector(values=(1.0, 0.0))
+        return EmbeddingVector(values=(0.0, 1.0))
+
+    def embed_text(self, text: str) -> EmbeddingVector:
+        return self._embed(text)
+
+    def embed_batch(
+        self, texts: Sequence[str], batch_size: int | None = None
+    ) -> list[EmbeddingVector]:
+        return [self._embed(text) for text in texts]
+
+    def dimension(self) -> int:
+        return 2
+
+    def model_name(self) -> str:
+        return "recipe-aware-stub"
+
+
+class PlaceholderCitationLLM(StubLLM):
+    def generate_response(
+        self, context: Sequence[str], user_input: str, *, attach_images: bool = True
+    ) -> str:
+        self.last_context = list(context)
+        self.last_attach_images = attach_images
+        return "La inferencia ocurre en el dispositivo [Archivo, Pág 7]."
+
+
+def test_visual_evidence_uses_the_compact_recipe_for_legacy_chunks(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    image = settings.extracted_images_dir / "p24_i0.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-pipeline"),
+        content="[IMAGEN] Fig. 15. Accelerator design flow.",
+        page=24,
+        is_visual=True,
+        metadata={
+            "image_path": str(image),
+            "image_title": "Fig. 15.",
+            "document_title": "Efficient Acceleration Review",
+            "document_name": "Efficient_Acceleration_Review.pdf",
+            "page_number": 24,
+            "theme_summary": "pipeline accelerator",
+            "surrounding_text_context": "generic training to inference pipeline",
+        },
+    )
+    use_case = _use_case(
+        settings,
+        [chunk],
+        embedding=RecipeAwareEmbedding(),
+    )
+
+    result = use_case.execute(
+        InboundPayloadDTO(
+            user_input="show me Block diagram of the generic training to inference pipeline"
+        )
+    )
+
+    assert result.used_tool == "analizar_imagen"
+    assert [Path(item.image_path).name for item in result.visual_evidence] == ["p24_i0.png"]
+
+
+def test_text_only_search_never_returns_visual_evidence(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    image = settings.extracted_images_dir / "tiny_related.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-tiny"),
+        content="[IMAGEN] tinyML benchmark",
+        page=6,
+        is_visual=True,
+        metadata={
+            "image_path": str(image),
+            "image_title": "Fig. 1.",
+            "document_title": "TinyML review",
+            "page_number": 6,
+        },
+    )
+    use_case = _use_case(settings, [chunk], embedding=KeywordEmbedding(keyword="tinyml"))
+
+    result = use_case.execute(InboundPayloadDTO(user_input="¿Qué es tinyML?"))
+
+    assert result.used_tool == "buscar_manual"
+    assert result.visual_evidence == ()
+
+
+def test_citation_placeholder_is_rendered_with_the_real_source(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    chunk = ManualChunk(
+        chunk_id=ChunkId("text-7"),
+        content="La inferencia se ejecuta en microcontroladores.",
+        page=7,
+        metadata={
+            "source": "Deploying_TinyML_EdgeAI.pdf",
+            "page_number": 7,
+            "document_title": "TinyML edge deployment",
+        },
+    )
+    use_case = _use_case(settings, [chunk], llm=PlaceholderCitationLLM())
+
+    result = use_case.execute(InboundPayloadDTO(user_input="explica el proceso de inferencia"))
+
+    assert result.response_text == (
+        "La inferencia ocurre en el dispositivo [Deploying_TinyML_EdgeAI.pdf, Pág 7]."
+    )

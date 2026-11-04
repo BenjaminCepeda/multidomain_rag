@@ -608,3 +608,46 @@ def test_analyze_image_uses_query_aware_prompt(
     prompt = captured["json"]["messages"][0]["content"][0]["text"]
     assert "Cadence Stratus HLS" in prompt
     assert "consulta" in prompt.lower()
+
+
+def test_router_prompt_allows_manual_visual_requests_without_uploaded_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse(content='{"herramienta": "analizar_imagen"}')
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    decision = adapter.get_orchestrator_decision(
+        "show me Block diagram of the generic training to inference pipeline", False
+    )
+
+    assert decision.herramienta == "analizar_imagen"
+    system_prompt = captured["json"]["messages"][0]["content"].casefold()
+    assert "diagrama" in system_prompt
+    assert "pipeline" in system_prompt
+    assert "aunque no haya subido una imagen" in system_prompt
+
+
+def test_text_only_generation_prompt_forbids_the_generic_archive_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _adapter()
+    captured = _capture_payload(monkeypatch, adapter)
+
+    adapter.generate_response(
+        ["=== FRAGMENTO 1 ===\nFUENTE: manual.pdf\nPAGINA: 3\n\nTexto tecnico"],
+        "pregunta",
+        attach_images=False,
+    )
+
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    user_prompt = captured["payload"]["messages"][1]["content"]
+    assert "Nunca escribas 'Archivo'" in system_prompt
+    assert "[Archivo, Pág]" not in system_prompt
+    assert "[Archivo, Pág]" not in user_prompt
+    assert "FUENTE y PAGINA" in user_prompt

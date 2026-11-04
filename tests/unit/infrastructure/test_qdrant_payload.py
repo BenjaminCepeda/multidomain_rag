@@ -1,4 +1,5 @@
 from src.domain.models.document import ManualChunk
+from src.domain.models.embedding import EmbeddingVector
 from src.domain.models.ids import ChunkId
 from src.infrastructure.adapters.qdrant_adapter import QdrantAdapter
 
@@ -114,3 +115,63 @@ def test_exists_by_file_hash_returns_false_for_empty_hash() -> None:
     adapter = object.__new__(QdrantAdapter)
 
     assert adapter.exists_by_file_hash("") is False
+
+
+def test_visual_payload_persists_the_canonical_embedding_text() -> None:
+    chunk = ManualChunk(
+        chunk_id=ChunkId("doc-uuid:visual:24:0"),
+        content="[IMAGEN] Fig. 15. Accelerator design flow.",
+        page=24,
+        is_visual=True,
+        metadata={"image_path": "/data/extracted_images/p24_i0.png"},
+        embedding_text="[IMAGEN] Fig. 15.\nDocumento: Review (pag. 24)\nTema: pipeline",
+    )
+
+    payload = QdrantAdapter._build_payload(chunk)
+
+    assert payload["embedding_text"] == chunk.embedding_text
+
+
+class _FakeSearchHit:
+    def __init__(self, point_id: str, payload: dict[str, object]) -> None:
+        self.id = point_id
+        self.payload = payload
+
+
+class _FakeSearchClient:
+    def __init__(self, hits: list[_FakeSearchHit]) -> None:
+        self._hits = hits
+
+    def collection_exists(self, collection_name: str) -> bool:
+        return True
+
+    def search(
+        self,
+        *,
+        collection_name: str,
+        query_vector: object,
+        limit: int,
+    ) -> list[_FakeSearchHit]:
+        return self._hits
+
+
+def test_search_restores_the_persisted_embedding_text() -> None:
+    payload = {
+        "chunk_id": "doc-uuid:visual:24:0",
+        "content": "[IMAGEN] Fig. 15. Accelerator design flow.",
+        "is_visual": True,
+        "page": 24,
+        "page_number": 24,
+        "embedding_text": "[IMAGEN] Fig. 15.\nDocumento: Review (pag. 24)\nTema: pipeline",
+    }
+    adapter = object.__new__(QdrantAdapter)
+    adapter._client = _FakeSearchClient([_FakeSearchHit("point-1", payload)])  # type: ignore[assignment]
+    adapter._collection_name = "technical_docs"
+    adapter._sparse_model = None
+
+    chunks = adapter.search(EmbeddingVector(values=(0.1, 0.2)), limit=10, min_score=0.2)
+
+    assert len(chunks) == 1
+    assert chunks[0].embedding_text == payload["embedding_text"]
+    assert chunks[0].embedding_input == payload["embedding_text"]
+    assert "embedding_text" not in chunks[0].metadata

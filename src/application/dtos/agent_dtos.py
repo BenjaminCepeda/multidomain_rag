@@ -23,11 +23,21 @@ class VisualEvidenceDTO:
     page: int
     thumbnail_path: str | None = None
     original_path: str | None = None
+    vision_path: str | None = None
 
     @property
     def display_path(self) -> str:
         """Small asset used in the chat history; the original stays on demand."""
         return self.thumbnail_path or self.image_path
+
+    @property
+    def analysis_path(self) -> str:
+        """Smallest derivative suitable for the local vision model.
+
+        The original resolution asset is kept for the UI and downloads; the
+        model receives the optimized derivative to bound the request payload.
+        """
+        return self.vision_path or self.original_path or self.image_path
 
     @property
     def caption(self) -> str:

@@ -1,3 +1,4 @@
+import base64
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -6,7 +7,7 @@ from typing import Any
 import pytest
 import requests
 
-from src.domain.exceptions.core_errors import LLMInferenceError
+from src.domain.exceptions.core_errors import LLMInferenceError, UnsupportedVisionModelError
 from src.infrastructure.adapters import local_llm_adapter
 from src.infrastructure.adapters.local_llm_adapter import (
     MAX_IMAGES_PER_REQUEST,
@@ -608,6 +609,70 @@ def test_analyze_image_uses_query_aware_prompt(
     prompt = captured["json"]["messages"][0]["content"][0]["text"]
     assert "Cadence Stratus HLS" in prompt
     assert "consulta" in prompt.lower()
+
+
+def test_analyze_image_payload_contains_the_selected_derivative_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "diagram_v1.jpg"
+    image.write_bytes(b"\xff\xd8\xff" + b"derivative-payload")
+    adapter = _adapter()
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse(content="diagrama")
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    assert adapter.analyze_image(str(image)) == "diagrama"
+    image_url = captured["json"]["messages"][0]["content"][1]["image_url"]["url"]
+    assert image_url.startswith("data:image/jpeg;base64,")
+    encoded = image_url.split(",", 1)[1]
+    assert base64.b64decode(encoded) == image.read_bytes()
+    metrics = adapter.consume_call_metrics()
+    assert metrics is not None
+    assert metrics.operation == "vision"
+    assert metrics.images_attached == 1
+    assert metrics.image_bytes == image.stat().st_size
+    assert metrics.payload_bytes > metrics.image_bytes
+
+
+def test_analyze_image_classifies_unsupported_vision_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"payload")
+    adapter = _adapter()
+    body = json.dumps(
+        {
+            "error": {
+                "message": (
+                    "The provided messages contain images, but qwen3-14b "
+                    "does not support image inputs."
+                ),
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+            }
+        }
+    )
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(status_code=400, body=body)
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    with caplog.at_level("WARNING"), pytest.raises(UnsupportedVisionModelError):
+        adapter.analyze_image(str(image), question="muestrame el diagrama")
+
+    metrics = adapter.consume_call_metrics()
+    assert metrics is not None
+    assert metrics.operation == "vision"
+    assert metrics.status == "vision_unsupported"
+    assert metrics.images_attached == 1
+    assert metrics.image_bytes == image.stat().st_size
+    assert "vision_unsupported" in caplog.text
+    assert "does not support image inputs" not in caplog.text
 
 
 def test_router_prompt_allows_manual_visual_requests_without_uploaded_image(

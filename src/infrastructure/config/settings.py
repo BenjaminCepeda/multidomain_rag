@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     vision_max_total_payload_bytes: int = Field(default=4_000_000, ge=100_000)
     vision_thumbnail_long_edge_px: int = Field(default=512, ge=64, le=1024)
     vision_token_divisor: int = Field(default=28, ge=1)
+    # Visual evidence returned to the UI is filtered by semantic similarity
+    # against the operator query. The candidate pool is wider than the text
+    # context so visual chunks ranked below the top-k can still be considered.
+    vision_evidence_min_similarity: float = Field(default=0.55, ge=0.0, le=1.0)
+    vision_evidence_candidate_limit: int = Field(default=24, ge=4, le=100)
 
     # --- FILES PRECESSED PATHS ---
     data_files_path: str = Field(default="./data")

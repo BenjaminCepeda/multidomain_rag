@@ -22,6 +22,8 @@ class StubLLM(ILLMEngine):
     def __init__(self) -> None:
         self.last_context: list[str] = []
         self.last_attach_images: bool | None = None
+        self.analyzed_images: list[str] = []
+        self.last_vision_question: str | None = None
 
     def get_orchestrator_decision(self, user_input: str, has_image: bool) -> OrchestratorDecision:
         return OrchestratorDecision(razonamiento="requiere manual", herramienta="buscar_manual")
@@ -33,7 +35,9 @@ class StubLLM(ILLMEngine):
         self.last_attach_images = attach_images
         return "respuesta sintetizada"
 
-    def analyze_image(self, image_path: str) -> str:
+    def analyze_image(self, image_path: str, question: str | None = None) -> str:
+        self.analyzed_images.append(image_path)
+        self.last_vision_question = question
         return "analisis"
 
     def health_check(self) -> bool:
@@ -54,6 +58,32 @@ class StubEmbedding(IEmbeddingService):
 
     def model_name(self) -> str:
         return "stub"
+
+
+class KeywordEmbedding(IEmbeddingService):
+    """Two-axis embedding that separates in-domain from unrelated content."""
+
+    def __init__(self, keyword: str) -> None:
+        self._keyword = keyword.casefold()
+
+    def _embed(self, text: str) -> EmbeddingVector:
+        if self._keyword in text.casefold():
+            return EmbeddingVector(values=(1.0, 0.0))
+        return EmbeddingVector(values=(0.0, 1.0))
+
+    def embed_text(self, text: str) -> EmbeddingVector:
+        return self._embed(text)
+
+    def embed_batch(
+        self, texts: Sequence[str], batch_size: int | None = None
+    ) -> list[EmbeddingVector]:
+        return [self._embed(text) for text in texts]
+
+    def dimension(self) -> int:
+        return 2
+
+    def model_name(self) -> str:
+        return "keyword-stub"
 
 
 class StubRepository(IVectorRepository):
@@ -128,12 +158,15 @@ def _text_chunk(image_paths: str, page: int = 2) -> ManualChunk:
 
 
 def _use_case(
-    settings: Settings, chunks: list[ManualChunk], llm: StubLLM | None = None
+    settings: Settings,
+    chunks: list[ManualChunk],
+    llm: StubLLM | None = None,
+    embedding: IEmbeddingService | None = None,
 ) -> OrchestrateAgentUseCase:
     return OrchestrateAgentUseCase(
         llm_engine=llm or StubLLM(),
         vector_repo=StubRepository(chunks),
-        embedding=StubEmbedding(),
+        embedding=embedding or StubEmbedding(),
         settings=settings,
     )
 
@@ -461,3 +494,140 @@ def test_visual_evidence_exposes_thumbnail_and_original_paths(tmp_path: Path) ->
     evidence = result.visual_evidence[0]
     assert evidence.display_path == str(thumbnail.resolve())
     assert evidence.original_path == str(original.resolve())
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "muéstrame el gráfico relacionado con HLS",
+        "necesito un diagrama del pipeline",
+        "show me the chart for inference latency",
+        "revisa la figura 20",
+        "describe el esquema de memoria",
+        "cual es la imagen del procesador",
+    ],
+)
+def test_visual_intent_detection_accepts_explicit_visual_requests(query: str) -> None:
+    assert OrchestrateAgentUseCase._has_visual_intent(query) is True
+
+
+@pytest.mark.parametrize(
+    "query", ["explica el proceso de inferencia", "que es un acelerador", "", "  "]
+)
+def test_visual_intent_detection_ignores_text_only_queries(query: str) -> None:
+    assert OrchestrateAgentUseCase._has_visual_intent(query) is False
+
+
+def test_visual_intent_forces_image_analysis_over_router_choice(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    image = settings.extracted_images_dir / "hls.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-hls"),
+        content="[IMAGEN] Fig. 20. Cadence Stratus HLS for RTL synthesis",
+        page=29,
+        is_visual=True,
+        metadata={
+            "image_path": str(image),
+            "image_title": "Fig. 20.",
+            "document_title": "Edge inference review",
+            "page_number": 29,
+        },
+    )
+    llm = StubLLM()
+    use_case = _use_case(settings, [chunk], llm=llm, embedding=KeywordEmbedding(keyword="hls"))
+    query = "muestrame el grafico de Cadence Stratus HLS"
+
+    result = use_case.execute(InboundPayloadDTO(user_input=query))
+
+    assert result.used_tool == "analizar_imagen"
+    assert llm.last_attach_images is True
+    assert llm.analyzed_images == [str(image.resolve())]
+    assert llm.last_vision_question == query
+    assert [Path(item.image_path).name for item in result.visual_evidence] == ["hls.png"]
+
+
+def test_visual_evidence_filters_unrelated_graphics_from_same_page(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    relevant = settings.extracted_images_dir / "hls.png"
+    irrelevant = settings.extracted_images_dir / "tensorflow.png"
+    relevant.write_bytes(b"\x89PNG\r\n\x1a\n")
+    irrelevant.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    relevant_chunk = ManualChunk(
+        chunk_id=ChunkId("visual-hls"),
+        content="[IMAGEN] Fig. 20. Cadence Stratus HLS RTL synthesis",
+        page=29,
+        is_visual=True,
+        metadata={
+            "image_path": str(relevant),
+            "image_title": "Fig. 20.",
+            "document_title": "Edge inference review",
+            "page_number": 29,
+        },
+    )
+    irrelevant_chunk = ManualChunk(
+        chunk_id=ChunkId("visual-tensorflow"),
+        content="[IMAGEN] TensorFlow training graph for mobile deployment",
+        page=29,
+        is_visual=True,
+        metadata={
+            "image_path": str(irrelevant),
+            "image_title": "Fig. 21.",
+            "document_title": "Edge inference review",
+            "page_number": 29,
+        },
+    )
+    page_chunk = ManualChunk(
+        chunk_id=ChunkId("text-page-29"),
+        content="Cadence Stratus HLS for RTL synthesis and Snapdragon inference",
+        page=29,
+        metadata={
+            "document_title": "Edge inference review",
+            "page_number": 29,
+            "image_paths": f"{relevant}|{irrelevant}",
+        },
+    )
+    use_case = _use_case(
+        settings,
+        [page_chunk, relevant_chunk, irrelevant_chunk],
+        embedding=KeywordEmbedding(keyword="hls"),
+    )
+
+    result = use_case.execute(
+        InboundPayloadDTO(user_input="muestrame el grafico de Cadence Stratus HLS para Snapdragon")
+    )
+
+    assert [Path(item.image_path).name for item in result.visual_evidence] == ["hls.png"]
+
+
+def test_visual_intent_falls_back_to_text_when_no_visual_is_relevant(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings.extracted_images_dir.mkdir(parents=True)
+    unrelated = settings.extracted_images_dir / "tensorflow.png"
+    unrelated.write_bytes(b"\x89PNG\r\n\x1a\n")
+    chunk = ManualChunk(
+        chunk_id=ChunkId("visual-tensorflow"),
+        content="[IMAGEN] TensorFlow training graph for mobile deployment",
+        page=12,
+        is_visual=True,
+        metadata={
+            "image_path": str(unrelated),
+            "image_title": "Fig. 3.",
+            "document_title": "Edge inference review",
+            "page_number": 12,
+        },
+    )
+    llm = StubLLM()
+    use_case = _use_case(settings, [chunk], llm=llm, embedding=KeywordEmbedding(keyword="hls"))
+
+    result = use_case.execute(
+        InboundPayloadDTO(user_input="muestrame el grafico de Cadence Stratus HLS")
+    )
+
+    assert result.used_tool == "buscar_manual"
+    assert result.visual_evidence == ()
+    assert llm.analyzed_images == []
+    assert llm.last_attach_images is False

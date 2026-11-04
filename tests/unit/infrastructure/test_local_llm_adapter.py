@@ -588,3 +588,23 @@ def test_analyze_image_uses_detected_mime_type(
     assert adapter.analyze_image(str(image)) == "diagrama"
     url = captured["json"]["messages"][0]["content"][1]["image_url"]["url"]
     assert url.startswith("data:image/bmp;base64,")
+
+
+def test_analyze_image_uses_query_aware_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    adapter = _adapter()
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _FakeResponse(content="diagrama")
+
+    monkeypatch.setattr(adapter, "_session", type("S", (), {"post": staticmethod(fake_post)})())
+
+    assert adapter.analyze_image(str(image), question="Cadence Stratus HLS") == "diagrama"
+    prompt = captured["json"]["messages"][0]["content"][0]["text"]
+    assert "Cadence Stratus HLS" in prompt
+    assert "consulta" in prompt.lower()

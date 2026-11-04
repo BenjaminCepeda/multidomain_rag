@@ -118,6 +118,18 @@ def _image_mime_type(image_path: str, data: bytes | None = None) -> str:
     return _IMAGE_MIME_TYPES.get(extension, "image/png")
 
 
+def _vision_prompt(question: str | None) -> str:
+    """Build a bounded vision prompt that stays focused on the operator intent."""
+    clean = (question or "").strip()
+    if not clean:
+        return "Describe este diagrama tecnico brevemente."
+    return (
+        "Analiza la imagen en relacion con esta consulta del operador. "
+        "Describe solo los elementos, valores y relaciones visibles que ayuden a "
+        f"responderla.\nConsulta: {clean[:500]}"
+    )
+
+
 def _image_dimensions(data: bytes) -> tuple[int, int]:
     try:
         with Image.open(io.BytesIO(data)) as image:
@@ -922,7 +934,7 @@ class LocalLLMAdapter(ILLMEngine):
             return self._post_completion(url, payload, timeout)
 
     # --- Vision --------------------------------------------------------
-    def analyze_image(self, image_path: str) -> str:
+    def analyze_image(self, image_path: str, question: str | None = None) -> str:
         started = time.perf_counter()
         queue_wait = 0.0
         status = "ok"
@@ -959,7 +971,7 @@ class LocalLLMAdapter(ILLMEngine):
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Describe este diagrama tecnico brevemente.",
+                                "text": _vision_prompt(question),
                             },
                             {
                                 "type": "image_url",

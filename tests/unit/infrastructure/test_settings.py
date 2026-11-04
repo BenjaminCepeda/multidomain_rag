@@ -24,6 +24,8 @@ def test_settings_defaults() -> None:
     assert s.vision_jpeg_quality == 80
     assert s.vision_max_total_payload_bytes == 4_000_000
     assert s.vision_thumbnail_long_edge_px == 512
+    assert s.vision_evidence_min_similarity == 0.55
+    assert s.vision_evidence_candidate_limit == 24
 
 
 @pytest.mark.parametrize("value", [8.0, 9.0, 10.0])
@@ -42,6 +44,22 @@ def test_router_read_timeout_accepts_contract_bounds(value: float) -> None:
     ],
 )
 def test_router_settings_reject_values_outside_the_contract(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("vision_evidence_min_similarity", -0.1),
+        ("vision_evidence_min_similarity", 1.1),
+        ("vision_evidence_candidate_limit", 3),
+        ("vision_evidence_candidate_limit", 101),
+    ],
+)
+def test_visual_evidence_settings_reject_values_outside_the_contract(
+    field: str, value: float
+) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{field: value})
 

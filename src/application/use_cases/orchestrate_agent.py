@@ -1,6 +1,9 @@
 # src/application/use_cases/orchestrate_agent.py
 import logging
+import math
+import re
 import time
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,8 +13,9 @@ from src.application.dtos.agent_dtos import (
     OutboundResponseDTO,
     VisualEvidenceDTO,
 )
-from src.domain.exceptions.core_errors import DataIncompleteError, DomainBaseError
+from src.domain.exceptions.core_errors import DomainBaseError
 from src.domain.models.document import ManualChunk
+from src.domain.models.embedding import EmbeddingVector
 from src.domain.models.telemetry import LLMCallMetrics, PhaseTimings, TurnTrace
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.llm_engine import ILLMEngine
@@ -22,6 +26,20 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_TOOLS = frozenset({"buscar_manual", "analizar_imagen", "responder_directo"})
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
+
+# Deterministic pre-routing signal: an explicit request for a visual artefact
+# always needs the multimodal tool, regardless of the router's text bias.
+VISUAL_INTENT_PATTERN = re.compile(
+    r"\b(?:grafic[oa]s?|diagramas?|imagen(?:es)?|charts?|figuras?|esquemas?|"
+    r"ilustracion(?:es)?|infografias?|visual(?:es)?)\b",
+    re.IGNORECASE,
+)
+VISUAL_INTENT_PAGE_CHUNKS = 3
+
+
+def _strip_accents(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def _clip_context(text: str, max_chars: int) -> str:
@@ -65,6 +83,7 @@ class OrchestrateAgentUseCase:
     def execute(self, payload: InboundPayloadDTO) -> OutboundResponseDTO:
         turn_id = uuid.uuid4().hex
         has_image: bool = payload.image_path is not None
+        visual_intent = self._has_visual_intent(payload.user_input)
         start_time = time.perf_counter()
 
         routing_seconds = 0.0
@@ -119,6 +138,14 @@ class OrchestrateAgentUseCase:
                     error_code,
                 )
 
+            if visual_intent and used_tool != "analizar_imagen":
+                logger.info(
+                    "VISUAL_INTENT | turn_id=%s | router_tool=%s | forced_tool=analizar_imagen",
+                    turn_id,
+                    used_tool,
+                )
+                used_tool = "analizar_imagen"
+
             logger.info(
                 "AGENT_ROUTE | turn_id=%s | tool=%s | fallback=%s",
                 turn_id,
@@ -141,10 +168,13 @@ class OrchestrateAgentUseCase:
                     len(payload.user_input),
                 )
                 retrieval_start = time.perf_counter()
-                chunks: list[ManualChunk] = self._repo.search(
-                    query_vector=query_vector, limit=3, min_score=0.20
+                candidates: list[ManualChunk] = self._repo.search(
+                    query_vector=query_vector,
+                    limit=self._settings.vision_evidence_candidate_limit,
+                    min_score=0.20,
                 )
                 retrieval_seconds = time.perf_counter() - retrieval_start
+                chunks = candidates[:VISUAL_INTENT_PAGE_CHUNKS]
 
                 if not chunks:
                     logger.warning(
@@ -156,58 +186,108 @@ class OrchestrateAgentUseCase:
                     logger.info("MANUAL_SEARCH | turn_id=%s | fragments=%d", turn_id, len(chunks))
                     current_phase = "evidence"
                     evidence_start = time.perf_counter()
-                    visual_evidence = self._collect_visual_evidence(chunks)
+                    visual_evidence = self._collect_visual_evidence(query_vector, candidates)
                     evidence_seconds = time.perf_counter() - evidence_start
 
                 current_phase = "prompt"
                 prompt_start = time.perf_counter()
-                max_chars = self._settings.llm_context_max_chars_per_chunk
-                for i, c in enumerate(chunks):
-                    src = c.metadata.get("source") or c.metadata.get("filename") or "Desconocido"
-                    pval = c.metadata.get("page") or c.metadata.get("page_number") or c.page
-                    header = f"=== FRAGMENTO {i + 1} ===\nFUENTE: {src}\nPAGINA: {pval}\n"
-                    document_title = c.metadata.get("document_title")
-                    image_title = c.metadata.get("image_title")
-                    if document_title:
-                        header += f"DOCUMENTO: {document_title}\n"
-                    if image_title:
-                        header += f"IMAGEN: {image_title}\n"
-                    # The LLM consumes the optimized derivative, never the
-                    # full-resolution original kept for the UI.
-                    img_paths = c.metadata.get("vision_paths") or c.metadata.get("image_paths")
-                    if img_paths:
-                        header += f"IMAGE_PATHS: {img_paths}\n"
-
-                    body = _clip_context(c.content, max_chars)
-                    if len(body) < len(c.content.strip()):
-                        truncated_chunks += 1
-                    context_chars += len(header) + 1 + len(body)
-                    contexto_sintesis.append(header + "\n" + body)
+                contexto_sintesis, context_chars, truncated_chunks = self._build_prompt_context(
+                    chunks, turn_id
+                )
                 prompt_seconds = time.perf_counter() - prompt_start
 
-                logger.info(
-                    "PROMPT_CONTEXT | turn_id=%s | chunks=%d | chars=%d | "
-                    "max_chars_per_chunk=%d | truncated=%d",
-                    turn_id,
-                    len(contexto_sintesis),
-                    context_chars,
-                    max_chars,
-                    truncated_chunks,
-                )
-
             elif used_tool == "analizar_imagen":
-                if not payload.image_path:
-                    raise DataIncompleteError("No se proporciono imagen.")
-                current_phase = "vision"
-                vision_start = time.perf_counter()
-                vision_analysis = self._llm.analyze_image(payload.image_path)
-                vision_analysis_seconds = time.perf_counter() - vision_start
-                vision_metrics = self._llm.consume_call_metrics()
-                if vision_metrics is not None:
-                    vision_analysis_seconds = max(
-                        0.0, vision_analysis_seconds - vision_metrics.queue_wait_seconds
+                if payload.image_path:
+                    current_phase = "vision"
+                    vision_start = time.perf_counter()
+                    vision_analysis = self._llm.analyze_image(
+                        payload.image_path, question=payload.user_input
                     )
-                contexto_sintesis = [f"[FUENTE: imagen]\n{vision_analysis}"]
+                    vision_analysis_seconds = time.perf_counter() - vision_start
+                    vision_metrics = self._llm.consume_call_metrics()
+                    if vision_metrics is not None:
+                        vision_analysis_seconds = max(
+                            0.0, vision_analysis_seconds - vision_metrics.queue_wait_seconds
+                        )
+                    contexto_sintesis = [f"[FUENTE: imagen]\n{vision_analysis}"]
+                else:
+                    # No uploaded image: the visual intent is satisfied by the
+                    # most semantically relevant indexed figure, if any.
+                    current_phase = "embedding"
+                    embedding_start = time.perf_counter()
+                    query_vector = self._embedding.embed_text(payload.user_input)
+                    embedding_seconds = time.perf_counter() - embedding_start
+
+                    current_phase = "retrieval"
+                    logger.info(
+                        "VISUAL_SEARCH | turn_id=%s | query_chars=%d",
+                        turn_id,
+                        len(payload.user_input),
+                    )
+                    retrieval_start = time.perf_counter()
+                    candidates = self._repo.search(
+                        query_vector=query_vector,
+                        limit=self._settings.vision_evidence_candidate_limit,
+                        min_score=0.20,
+                    )
+                    retrieval_seconds = time.perf_counter() - retrieval_start
+
+                    current_phase = "evidence"
+                    evidence_start = time.perf_counter()
+                    visual_evidence = self._collect_visual_evidence(query_vector, candidates)
+                    evidence_seconds = time.perf_counter() - evidence_start
+
+                    if visual_evidence:
+                        target = visual_evidence[0]
+                        current_phase = "vision"
+                        vision_start = time.perf_counter()
+                        vision_analysis = self._llm.analyze_image(
+                            target.original_path or target.image_path,
+                            question=payload.user_input,
+                        )
+                        vision_analysis_seconds = time.perf_counter() - vision_start
+                        vision_metrics = self._llm.consume_call_metrics()
+                        if vision_metrics is not None:
+                            vision_analysis_seconds = max(
+                                0.0,
+                                vision_analysis_seconds - vision_metrics.queue_wait_seconds,
+                            )
+
+                        current_phase = "prompt"
+                        prompt_start = time.perf_counter()
+                        text_context, context_chars, truncated_chunks = self._build_prompt_context(
+                            candidates[:VISUAL_INTENT_PAGE_CHUNKS],
+                            turn_id,
+                            include_image_paths=False,
+                        )
+                        prompt_seconds = time.perf_counter() - prompt_start
+                        contexto_sintesis = [
+                            f"[FUENTE: imagen]\n{vision_analysis}",
+                            *text_context,
+                        ]
+                        logger.info(
+                            "VISUAL_ANALYSIS | turn_id=%s | evidence=%d | analyzed=%d",
+                            turn_id,
+                            len(visual_evidence),
+                            1,
+                        )
+                    else:
+                        # Avoid rendering unrelated graphics: degrade to a
+                        # strictly text-only manual search instead.
+                        logger.info(
+                            "VISUAL_INTENT | turn_id=%s | action=fallback_to_text | "
+                            "reason=no_relevant_visual",
+                            turn_id,
+                        )
+                        used_tool = "buscar_manual"
+                        current_phase = "prompt"
+                        prompt_start = time.perf_counter()
+                        contexto_sintesis, context_chars, truncated_chunks = (
+                            self._build_prompt_context(
+                                candidates[:VISUAL_INTENT_PAGE_CHUNKS], turn_id
+                            )
+                        )
+                        prompt_seconds = time.perf_counter() - prompt_start
 
             elif used_tool == "responder_directo":
                 contexto_sintesis = ["No se requieren herramientas externas."]
@@ -384,24 +464,113 @@ class OrchestrateAgentUseCase:
         }
         return mapping.get(metrics.status, fallback)
 
-    def _collect_visual_evidence(
-        self, chunks: Sequence[ManualChunk]
-    ) -> tuple[VisualEvidenceDTO, ...]:
-        """Resolve indexed visual assets to renderable, in-scope local paths.
+    @staticmethod
+    def _has_visual_intent(query: str) -> bool:
+        """Return True when the operator explicitly asks for a visual artefact."""
+        if not query.strip():
+            return False
+        return VISUAL_INTENT_PATTERN.search(_strip_accents(query)) is not None
 
-        Both dedicated visual chunks and text fragments that reference the
-        figures on their page are considered, because top-k retrieval often
-        ranks the surrounding prose above the image chunk. Assets are
-        deduplicated by content hash when available and capped to the
-        configured multimodal budget.
+    def _build_prompt_context(
+        self,
+        chunks: Sequence[ManualChunk],
+        turn_id: str,
+        *,
+        include_image_paths: bool = True,
+    ) -> tuple[list[str], int, int]:
+        """Clip retrieved fragments and keep their source metadata in the prompt."""
+        max_chars = self._settings.llm_context_max_chars_per_chunk
+        context: list[str] = []
+        context_chars = 0
+        truncated = 0
+
+        for i, c in enumerate(chunks):
+            src = c.metadata.get("source") or c.metadata.get("filename") or "Desconocido"
+            pval = c.metadata.get("page") or c.metadata.get("page_number") or c.page
+            header = f"=== FRAGMENTO {i + 1} ===\nFUENTE: {src}\nPAGINA: {pval}\n"
+            document_title = c.metadata.get("document_title")
+            image_title = c.metadata.get("image_title")
+            if document_title:
+                header += f"DOCUMENTO: {document_title}\n"
+            if image_title:
+                header += f"IMAGEN: {image_title}\n"
+            # The LLM consumes the optimized derivative, never the
+            # full-resolution original kept for the UI.
+            if include_image_paths:
+                img_paths = c.metadata.get("vision_paths") or c.metadata.get("image_paths")
+                if img_paths:
+                    header += f"IMAGE_PATHS: {img_paths}\n"
+
+            body = _clip_context(c.content, max_chars)
+            if len(body) < len(c.content.strip()):
+                truncated += 1
+            context_chars += len(header) + 1 + len(body)
+            context.append(header + "\n" + body)
+
+        logger.info(
+            "PROMPT_CONTEXT | turn_id=%s | chunks=%d | chars=%d | "
+            "max_chars_per_chunk=%d | truncated=%d",
+            turn_id,
+            len(context),
+            context_chars,
+            max_chars,
+            truncated,
+        )
+        return context, context_chars, truncated
+
+    @staticmethod
+    def _cosine_similarity(left: EmbeddingVector, right: EmbeddingVector) -> float:
+        if left.dimension != right.dimension:
+            return 0.0
+        dot = sum(a * b for a, b in zip(left.values, right.values, strict=True))
+        left_norm = math.sqrt(sum(value * value for value in left.values))
+        right_norm = math.sqrt(sum(value * value for value in right.values))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        return dot / (left_norm * right_norm)
+
+    def _collect_visual_evidence(
+        self,
+        query_vector: EmbeddingVector,
+        chunks: Sequence[ManualChunk],
+    ) -> tuple[VisualEvidenceDTO, ...]:
+        """Return only visual assets that are semantically relevant to the query.
+
+        Dedicated visual chunks are authoritative because they describe one
+        specific figure. Page-level text chunks are used as a fallback only
+        when the retrieved pool contains no visual chunk at all: mixing both
+        sources would leak every figure drawn on a page regardless of topic.
+        Assets are deduplicated and capped to the multimodal budget.
         """
         assets_dir = self._settings.extracted_images_dir.resolve()
         limit = self._settings.vision_max_images_per_turn
-        evidence: list[VisualEvidenceDTO] = []
-        seen_paths: set[str] = set()
-        seen_hashes: set[str] = set()
+        min_similarity = self._settings.vision_evidence_min_similarity
 
-        for chunk in chunks:
+        visual_chunks = [c for c in chunks if c.is_visual and self._chunk_image_paths(c)]
+        text_chunks = (
+            []
+            if visual_chunks
+            else [
+                chunk for chunk in chunks if not chunk.is_visual and self._chunk_image_paths(chunk)
+            ]
+        )
+        scored_chunks = [*visual_chunks, *text_chunks]
+
+        if not scored_chunks:
+            logger.info(
+                "VISUAL_EVIDENCE | candidates=0 | selected=0 | min_similarity=%.2f",
+                min_similarity,
+            )
+            return ()
+
+        vectors = self._embedding.embed_batch([chunk.embedding_input for chunk in scored_chunks])
+        candidates: list[tuple[float, ManualChunk, Path, Path | None]] = []
+
+        for chunk, vector in zip(scored_chunks, vectors, strict=True):
+            score = self._cosine_similarity(query_vector, vector)
+            if score < min_similarity:
+                continue
+
             originals = self._chunk_image_paths(chunk)
             thumbnails = self._chunk_thumb_paths(chunk)
             for index, raw_path in enumerate(originals):
@@ -413,36 +582,48 @@ class OrchestrateAgentUseCase:
                     )
                     continue
 
-                resolved_key = str(resolved)
-                digest = chunk.metadata.get("image_sha256")
-                digest_key = str(digest) if digest else ""
-                if resolved_key in seen_paths or (digest_key and digest_key in seen_hashes):
-                    continue
-                seen_paths.add(resolved_key)
-                if digest_key:
-                    seen_hashes.add(digest_key)
-
                 thumbnail_raw = thumbnails[index] if index < len(thumbnails) else ""
                 thumbnail = (
                     self._resolve_asset_path(thumbnail_raw, assets_dir) if thumbnail_raw else None
                 )
-                evidence.append(
-                    VisualEvidenceDTO(
-                        image_path=str(resolved),
-                        image_title=str(chunk.metadata.get("image_title") or ""),
-                        document_title=str(
-                            chunk.metadata.get("document_title")
-                            or chunk.metadata.get("source")
-                            or ""
-                        ),
-                        page=chunk.page,
-                        thumbnail_path=str(thumbnail or resolved),
-                        original_path=str(resolved),
-                    )
-                )
-                if len(evidence) >= limit:
-                    return tuple(evidence)
+                candidates.append((score, chunk, resolved, thumbnail))
 
+        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+
+        evidence: list[VisualEvidenceDTO] = []
+        seen_paths: set[str] = set()
+        seen_hashes: set[str] = set()
+        for _score, chunk, resolved, thumbnail in candidates:
+            resolved_key = str(resolved)
+            digest = chunk.metadata.get("image_sha256")
+            digest_key = str(digest) if digest else ""
+            if resolved_key in seen_paths or (digest_key and digest_key in seen_hashes):
+                continue
+            seen_paths.add(resolved_key)
+            if digest_key:
+                seen_hashes.add(digest_key)
+
+            evidence.append(
+                VisualEvidenceDTO(
+                    image_path=str(resolved),
+                    image_title=str(chunk.metadata.get("image_title") or ""),
+                    document_title=str(
+                        chunk.metadata.get("document_title") or chunk.metadata.get("source") or ""
+                    ),
+                    page=chunk.page,
+                    thumbnail_path=str(thumbnail or resolved),
+                    original_path=str(resolved),
+                )
+            )
+            if len(evidence) >= limit:
+                break
+
+        logger.info(
+            "VISUAL_EVIDENCE | candidates=%d | selected=%d | min_similarity=%.2f",
+            len(scored_chunks),
+            len(evidence),
+            min_similarity,
+        )
         return tuple(evidence)
 
     @staticmethod

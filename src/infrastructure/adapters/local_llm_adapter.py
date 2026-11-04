@@ -66,7 +66,11 @@ _ROUTER_SYSTEM_PROMPT = (
     "Usa buscar_manual para CUALQUIER pregunta tecnica, conceptual o de procedimiento "
     "que pueda responderse con los manuales: definiciones, funcionamiento, pasos, "
     "configuracion o causas. "
-    "Usa analizar_imagen solo si la pregunta depende de la imagen adjunta. "
+    "Usa analizar_imagen cuando el operador pida ver, localizar, interpretar o comparar "
+    "una figura, diagrama, pipeline, arquitectura, esquema, grafico, flujo o imagen de "
+    "la documentacion, aunque no haya subido una imagen. "
+    "Usa buscar_manual para preguntas conceptuales o de procedimiento que no requieran "
+    "inspeccionar un recurso visual. "
     "Usa responder_directo SOLO para saludos, despedidas, agradecimientos o charla "
     "sin contenido tecnico."
 )
@@ -82,8 +86,9 @@ SYSTEM_PROMPT = (
     "o encontrar parcialmente en los fragmentos.\n"
     "- Explica paso a paso, procedimientos, rutas, comandos, nombres de herramientas "
     "o configuraciones cuando aparezcan en la documentación.\n"
-    "- Cita la fuente y la página al final de las afirmaciones clave usando "
-    "el formato [Archivo, Pág] si la metadata está disponible.\n"
+    "- Cita usando exactamente el valor literal de FUENTE y PAGINA del fragmento "
+    "relevante, con el formato [<nombre real del archivo>, Pág <número>]. "
+    "Nunca escribas 'Archivo' como fuente ni inventes nombres de documento.\n"
     "- No inventes pasos, nombres o valores. Solo si tras revisar TODO el contexto "
     "no hay absolutamente nada relacionado, usa exactamente: "
     "'No dispongo de información en los manuales'.\n"
@@ -148,7 +153,7 @@ def _build_user_text(context_str: str, user_input: str, include_images: bool) ->
         f"Pregunta del usuario:\n{user_input}\n\n"
         f"Instrucción: Usa ÚNICAMENTE el contexto anterior{attachment_note}. "
         "Si existe información relacionada, genera una respuesta completa y "
-        "accionable con referencias [Archivo, Pág]."
+        "accionable y cita cada afirmación con el valor real de FUENTE y PAGINA."
     )
 
 

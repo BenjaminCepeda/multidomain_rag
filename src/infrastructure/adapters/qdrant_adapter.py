@@ -129,6 +129,10 @@ class QdrantAdapter(IVectorRepository):
                 else None
             ),
         }
+        if chunk.embedding_text and chunk.embedding_text.strip():
+            # Preserve the canonical dense recipe so query-time re-scoring uses
+            # exactly the same representation that produced the stored vector.
+            payload["embedding_text"] = chunk.embedding_text
         for key, value in chunk.metadata.items():
             if isinstance(value, str | int | float | bool) and key not in payload:
                 payload[key] = value
@@ -278,8 +282,16 @@ class QdrantAdapter(IVectorRepository):
                 page_int = 1
             section_val = payload_raw.get("section")
             section_str = str(section_val) if section_val is not None else None
+            embedding_text_val = payload_raw.get("embedding_text")
+            embedding_text = (
+                embedding_text_val
+                if isinstance(embedding_text_val, str) and embedding_text_val.strip()
+                else None
+            )
             metadata_dict: dict[str, str | int | float | bool] = {}
             for k, v in payload_raw.items():
+                if k == "embedding_text":
+                    continue
                 if isinstance(v, str | int | float | bool):
                     metadata_dict[k] = v
             valid_results.append(
@@ -290,6 +302,7 @@ class QdrantAdapter(IVectorRepository):
                     page=page_int,
                     section=section_str,
                     metadata=metadata_dict,
+                    embedding_text=embedding_text,
                 )
             )
         return valid_results

@@ -1,9 +1,7 @@
 # src/application/use_cases/orchestrate_agent.py
 import logging
 import math
-import re
 import time
-import unicodedata
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +18,9 @@ from src.domain.models.telemetry import LLMCallMetrics, PhaseTimings, TurnTrace
 from src.domain.ports.embedding_service import IEmbeddingService
 from src.domain.ports.llm_engine import ILLMEngine
 from src.domain.ports.vector_repository import IVectorRepository
+from src.domain.services.citation_renderer import CitationRenderer
+from src.domain.services.visual_embedding import build_visual_embedding_text
+from src.domain.services.visual_intent import detect_visual_intent
 from src.infrastructure.config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -27,19 +28,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_TOOLS = frozenset({"buscar_manual", "analizar_imagen", "responder_directo"})
 ALLOWED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
-# Deterministic pre-routing signal: an explicit request for a visual artefact
-# always needs the multimodal tool, regardless of the router's text bias.
-VISUAL_INTENT_PATTERN = re.compile(
-    r"\b(?:grafic[oa]s?|diagramas?|imagen(?:es)?|charts?|figuras?|esquemas?|"
-    r"ilustracion(?:es)?|infografias?|visual(?:es)?)\b",
-    re.IGNORECASE,
-)
 VISUAL_INTENT_PAGE_CHUNKS = 3
-
-
-def _strip_accents(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", text.casefold())
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def _clip_context(text: str, max_chars: int) -> str:
@@ -83,7 +72,8 @@ class OrchestrateAgentUseCase:
     def execute(self, payload: InboundPayloadDTO) -> OutboundResponseDTO:
         turn_id = uuid.uuid4().hex
         has_image: bool = payload.image_path is not None
-        visual_intent = self._has_visual_intent(payload.user_input)
+        intent_decision = detect_visual_intent(payload.user_input)
+        visual_intent = intent_decision.is_visual
         start_time = time.perf_counter()
 
         routing_seconds = 0.0
@@ -99,6 +89,7 @@ class OrchestrateAgentUseCase:
         context_chars = 0
         truncated_chunks = 0
         visual_evidence: tuple[VisualEvidenceDTO, ...] = ()
+        citation_chunks: list[ManualChunk] = []
         used_tool = "orquestador"
         current_phase = "router"
         router_degraded = False
@@ -140,8 +131,11 @@ class OrchestrateAgentUseCase:
 
             if visual_intent and used_tool != "analizar_imagen":
                 logger.info(
-                    "VISUAL_INTENT | turn_id=%s | router_tool=%s | forced_tool=analizar_imagen",
+                    "VISUAL_INTENT | turn_id=%s | confidence=%.2f | signals=%s | "
+                    "router_tool=%s | forced_tool=analizar_imagen",
                     turn_id,
+                    intent_decision.confidence,
+                    ",".join(intent_decision.signals) or intent_decision.reason,
                     used_tool,
                 )
                 used_tool = "analizar_imagen"
@@ -184,10 +178,20 @@ class OrchestrateAgentUseCase:
                     )
                 else:
                     logger.info("MANUAL_SEARCH | turn_id=%s | fragments=%d", turn_id, len(chunks))
-                    current_phase = "evidence"
-                    evidence_start = time.perf_counter()
-                    visual_evidence = self._collect_visual_evidence(query_vector, candidates)
-                    evidence_seconds = time.perf_counter() - evidence_start
+                    citation_chunks = list(chunks)
+                    if visual_intent:
+                        current_phase = "evidence"
+                        evidence_start = time.perf_counter()
+                        visual_evidence = self._collect_visual_evidence(query_vector, candidates)
+                        evidence_seconds = time.perf_counter() - evidence_start
+                    else:
+                        # Text-only policy: a conceptual search must not attach
+                        # figures even when their similarity crosses a global
+                        # threshold.
+                        logger.info(
+                            "VISUAL_EVIDENCE | turn_id=%s | selected=0 | reason=text_only_policy",
+                            turn_id,
+                        )
 
                 current_phase = "prompt"
                 prompt_start = time.perf_counter()
@@ -255,8 +259,10 @@ class OrchestrateAgentUseCase:
 
                         current_phase = "prompt"
                         prompt_start = time.perf_counter()
+                        visual_context_chunks = candidates[:VISUAL_INTENT_PAGE_CHUNKS]
+                        citation_chunks = list(visual_context_chunks)
                         text_context, context_chars, truncated_chunks = self._build_prompt_context(
-                            candidates[:VISUAL_INTENT_PAGE_CHUNKS],
+                            visual_context_chunks,
                             turn_id,
                             include_image_paths=False,
                         )
@@ -282,10 +288,10 @@ class OrchestrateAgentUseCase:
                         used_tool = "buscar_manual"
                         current_phase = "prompt"
                         prompt_start = time.perf_counter()
+                        fallback_chunks = candidates[:VISUAL_INTENT_PAGE_CHUNKS]
+                        citation_chunks = list(fallback_chunks)
                         contexto_sintesis, context_chars, truncated_chunks = (
-                            self._build_prompt_context(
-                                candidates[:VISUAL_INTENT_PAGE_CHUNKS], turn_id
-                            )
+                            self._build_prompt_context(fallback_chunks, turn_id)
                         )
                         prompt_seconds = time.perf_counter() - prompt_start
 
@@ -304,6 +310,18 @@ class OrchestrateAgentUseCase:
             image_prep_seconds, inference_seconds, image_stats = self._split_generation(
                 generation_wall, generation_metrics
             )
+
+            respuesta_final, citation_stats = CitationRenderer(citation_chunks).render(
+                respuesta_final
+            )
+            if citation_stats.placeholders:
+                logger.info(
+                    "CITATION_RENDER | turn_id=%s | placeholders=%d | replaced=%d | fallback=%s",
+                    turn_id,
+                    citation_stats.placeholders,
+                    citation_stats.replaced,
+                    citation_stats.used_fallback_source,
+                )
 
             total_seconds = time.perf_counter() - start_time
             current_phase = "complete"
@@ -467,9 +485,7 @@ class OrchestrateAgentUseCase:
     @staticmethod
     def _has_visual_intent(query: str) -> bool:
         """Return True when the operator explicitly asks for a visual artefact."""
-        if not query.strip():
-            return False
-        return VISUAL_INTENT_PATTERN.search(_strip_accents(query)) is not None
+        return detect_visual_intent(query).is_visual
 
     def _build_prompt_context(
         self,
@@ -529,6 +545,35 @@ class OrchestrateAgentUseCase:
             return 0.0
         return dot / (left_norm * right_norm)
 
+    @staticmethod
+    def _chunk_embedding_input(chunk: ManualChunk) -> str:
+        """Return the canonical dense representation for query-time scoring.
+
+        Newly indexed visual chunks persist their compact ``embedding_text``.
+        Chunks indexed before that field existed are rebuilt with the same
+        ingestion recipe instead of falling back to the richer ``content``,
+        which dilutes the figure identity and depresses its similarity.
+        """
+        if chunk.embedding_text and chunk.embedding_text.strip():
+            return chunk.embedding_text
+        if not chunk.is_visual:
+            return chunk.content
+        metadata = chunk.metadata
+        theme_summary = str(metadata.get("theme_summary") or "")
+        surrounding = str(metadata.get("surrounding_text_context") or "")
+        if not theme_summary and not surrounding:
+            # Legacy chunk without the enriched visual context: its rich
+            # ``content`` is the only faithful representation available.
+            return chunk.content
+        return build_visual_embedding_text(
+            document_title=str(metadata.get("document_title") or ""),
+            document_name=str(metadata.get("document_name") or ""),
+            image_title=str(metadata.get("image_title") or ""),
+            page_number=chunk.page,
+            theme_summary=theme_summary,
+            surrounding_text_context=surrounding,
+        )
+
     def _collect_visual_evidence(
         self,
         query_vector: EmbeddingVector,
@@ -558,16 +603,21 @@ class OrchestrateAgentUseCase:
 
         if not scored_chunks:
             logger.info(
-                "VISUAL_EVIDENCE | candidates=0 | selected=0 | min_similarity=%.2f",
+                "VISUAL_EVIDENCE | candidates=0 | selected=0 | top_score=0.000 | "
+                "min_similarity=%.2f",
                 min_similarity,
             )
             return ()
 
-        vectors = self._embedding.embed_batch([chunk.embedding_input for chunk in scored_chunks])
+        vectors = self._embedding.embed_batch(
+            [self._chunk_embedding_input(chunk) for chunk in scored_chunks]
+        )
         candidates: list[tuple[float, ManualChunk, Path, Path | None]] = []
+        best_score = 0.0
 
         for chunk, vector in zip(scored_chunks, vectors, strict=True):
             score = self._cosine_similarity(query_vector, vector)
+            best_score = max(best_score, score)
             if score < min_similarity:
                 continue
 
@@ -589,6 +639,7 @@ class OrchestrateAgentUseCase:
                 candidates.append((score, chunk, resolved, thumbnail))
 
         candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        top_score = best_score
 
         evidence: list[VisualEvidenceDTO] = []
         seen_paths: set[str] = set()
@@ -619,9 +670,10 @@ class OrchestrateAgentUseCase:
                 break
 
         logger.info(
-            "VISUAL_EVIDENCE | candidates=%d | selected=%d | min_similarity=%.2f",
+            "VISUAL_EVIDENCE | candidates=%d | selected=%d | top_score=%.3f | min_similarity=%.2f",
             len(scored_chunks),
             len(evidence),
+            top_score,
             min_similarity,
         )
         return tuple(evidence)
